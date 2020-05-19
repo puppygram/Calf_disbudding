@@ -38,7 +38,14 @@ theme_set(
 #Input data
 dat <- 
   read_excel("C:/Users/Hannah/Desktop/Disbudding project/disbudding_R_project/cortisol_data.xlsx", sheet = "Data") %>%
-  mutate_at(c("ID", "Treatment", "Hutch", "Breed", "Minute"), as.factor)
+  mutate_at(c("ID", "Treatment", "Hutch", "Breed", "Minute"), as.factor) %>%
+  mutate(
+    Treatment = ifelse(Treatment == "D", "Tincture", 
+                       ifelse(Treatment == "L", "Lidocaine", 
+                              ifelse(Treatment == "S", "Sham", NA)))
+  ) %>%
+  mutate(Treatment = as.factor(Treatment)) %>%
+  select(-c(Time, DOB, Date))
 
 baseline_dat <- dat %>%
   filter(Minute == "-10")
@@ -51,32 +58,44 @@ dat <- dat %>%
   group_by(ID) %>% 
   mutate(Baseline = Cortisol[Minute == "-10"]) %>%
   filter(Minute != "-10")
+  
 ```
 
 ## Histograms
 ```{r, echo = T}
 #natural scale 
-ggplot(dat, aes(Cortisol)) +
-  geom_histogram(aes(y = ..density..), binwidth = 2) +
+plot1 <- 
+  ggplot(dat, aes(Cortisol)) +
+  geom_histogram(aes(y = ..density..), binwidth = 5) +
   geom_density() +
-  labs(title = "Cortisol histogram on natural scale", x = "Cortisol")
+  labs(title = "Natural scale", x = "Serum cortisol, ng mL\u207B\u00B9")
 
 #log transformed
-ggplot(dat, aes(log(Cortisol + 1))) +
-  geom_histogram(aes(y = ..density..), binwidth = .2) +
+dat$logCortisol <- log(dat$Cortisol + 1)
+
+plot2 <-
+  ggplot(dat, aes(logCortisol)) +
+  geom_histogram(aes(y = ..density..), binwidth = 0.5) +
   geom_density() +
-  labs(title = "Cortisol histogram on log + 1 scale", x = "log(Cortisol + 1)")
+  labs(title = "log + 1 scale", x = "log(Serum cortisol + 1), ng mL\u207B\u00B9")
+
+cowplot::plot_grid(
+  plot1, 
+  plot2,
+  nrow = 1
+)
 ```
 
 ## Analysis
 ```{r}
 model <- 
   lme(
-    log(Cortisol + 1) ~ log(Baseline + 1) + Treatment*Minute, 
+    log(Cortisol + 1) ~ log1p(Baseline) + Treatment*Minute, 
     data = dat, 
-    random = ~ 1|Hutch/ID, 
-    correlation = corCAR1(form = ~ as.numeric(Minute)|Hutch/ID),
-    na.action = na.omit
+    random = ~1|Hutch/ID, 
+    correlation = corAR1(),
+    na.action = na.omit,
+    method = "REML"
   )
 
 #diagnostics
@@ -84,70 +103,152 @@ plot(model, main = "Residuals vs fitted")
 qqnorm(resid(model))
 qqline(resid(model))
 
+
+#check heteroscedasticity between groups
+res <- 
+  as.data.frame(
+    cbind(
+      res = residuals(model), 
+      Treatment = subset(dat, !is.na(Cortisol))$Treatment, 
+      Minute = subset(dat, !is.na(Cortisol))$Minute
+    )) %>%
+  mutate(Treatment = as.factor(Treatment)) %>%
+  mutate(Minute = as.factor(Minute))
+
+boxplot(res$res ~ res$Treatment)
+plot(res$res ~ res$Minute) ##shows heteroscedasticity 
+
+
+#fit heterogenous ar(1)
+model.het1 <- 
+  update(
+    model,
+    weights = varIdent(form = ~ 1 | Minute)
+  )
+
+model.het2 <- 
+  update(
+    model,
+    weights = varIdent(form = ~ 1 | Treatment)
+  )
+
+model.het3 <- 
+  update(
+    model,
+    weights = varIdent(form = ~ 1 | Treatment*Minute)
+  )
+
+
+AICtab(model, model.het1, model.het2, model.het3) ##heterogenous ar(1) is best
+
+
+#check residuals
+plot(model.het1, main = "Residuals vs fitted")
+qqnorm(resid(model.het1))
+qqline(resid(model.het1))
+
+model <- model.het1
+
+
 #output
 anova <- anova.lme(model)
-anova
+round(anova, 4)
 
 summary(model)
 
 #lsmeans
-lsmeans <- emmeans(model, ~ Treatment | Minute, type = "response", mode = "auto")
+lsmeans <- emmeans(model, ~ Treatment | Minute, type = "response")
 lsmeans
 
-lsmeans_df <- as.data.frame(lsmeans)
-
 #means seperation
+multcomp::cld(lsmeans, alpha = .05)
+
 confint(
   contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
            ratio = F, 
            method = "pairwise"), 
   level = 0.95
 )
-
-multcomp::cld(lsmeans, alpha = .05)
-
-remove(model, anova, lsmeans, lsmeans_df)
 ```
 
-## Baseline analysis
-```{r}
-model <- 
+```{r, include = F}
+# Baseline analysis
+model.b <- 
   lme(
     log(Cortisol + 1) ~ Treatment, 
     data = baseline_dat, 
     random = ~ 1|Hutch,
-    na.action = na.omit
+    na.action = na.omit, 
+    method = "REML"
   )
 
-#diagnostics
-plot(model, main = "Residuals vs fitted")
-qqnorm(resid(model))
-qqline(resid(model))
-
-#output
-anova <- anova.lme(model)
-anova
-
-summary(model)
-
 #lsmeans
-lsmeans <- emmeans(model, ~ Treatment, type = "response", mode = "auto")
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
-
-remove(model, anova, lsmeans, lsmeans_df)
+newDat.b <- 
+  emmip(
+    model.b, 
+    ~ Treatment,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) %>%
+   mutate(Minute.n = -10)
 ```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) %>%
+  mutate(Minute.n = as.numeric(Minute)) %>%
+  mutate(
+    Minute.n = ifelse(Minute.n == 1, 1, 
+                      ifelse(Minute.n == 2, 10, 
+                             ifelse(Minute.n == 3, 30, 
+                                    ifelse(Minute.n == 4, 90, 
+                                           ifelse(Minute.n == 5, 210, 
+                                                  ifelse(Minute.n == 6, 450, NA))))))
+  ) %>%
+  select(-Minute)
+
+#merge with baseline means
+newDat <- rbind(newDat, newDat.b)
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute.n, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_errorbar(aes(ymin = LCL, ymax = UCL)) +
+  
+  labs(x = "Time after disbudding, min", 
+       y = "Serum cortisol, ng mL\u207B\u00B9") +
+  
+  scale_y_continuous(breaks = seq(0, 40, 10), minor_breaks = seq(0, 40, 5), limits = c(0, NA)) +
+  
+  scale_x_continuous(breaks = c(-10, 1, 10, 30, 90, 210, 450), minor_breaks = NULL, expand = c(0,0)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.8, .8)
+  ) +
+  
+  ggsave("figure_cortisol.png", width = 9, height = 5)
+```
+
+
+
 
 
 # Behavior at disbudding
@@ -156,16 +257,29 @@ remove(model, anova, lsmeans, lsmeans_df)
 dat <-
   read_excel("disbudding_behavior_data.xlsx") %>%
   mutate_at(c("ID", "Treatment", "Hutch", "Breed"), as.factor) %>%
-  filter(!is.na(Handle_time)) %>%
-  mutate(Head_movement = Head_avoidance + Head_stretch)
+  mutate(Head_movement = Head_avoidance + Head_stretch) %>%
+  mutate(
+    Treatment = ifelse(Treatment == "D", "Tincture", 
+                       ifelse(Treatment == "L", "Lidocaine", 
+                              ifelse(Treatment == "S", "Sham", NA)))
+    
+  ) %>%
+  mutate(Treatment = as.factor(Treatment)) %>%
+  select(-Time)
+
+#impute mean handle time value for missing observations
+mean_handle_time <- round(mean(dat$Handle_time, na.rm = T), 0)
+
+dat <- dat %>%
+  mutate(Handle_time_impute = ifelse(is.na(Handle_time), mean_handle_time, Handle_time))
 ```
 
 ## Summary of data
 ```{r}
 summary <- 
   cbind(
-    vars = rownames(describe(dat[, 10:20], fast = T)), 
-    describe(dat[, 10:20], fast = T) %>%
+    vars = rownames(describe(dat[, 9:19], fast = T)), 
+    describe(dat[, 9:19], fast = T) %>%
       mutate(var = sd^2) %>%
       mutate_if(is.numeric, round, digits = 2)
   )
@@ -183,19 +297,32 @@ zeros <-
     Fall = sum(count_row_if(0, dat$Fall))/countFunction(dat$Fall), 
     Tail_wag = sum(count_row_if(0, dat$Tail_wag))/countFunction(dat$Tail_wag), 
     Head_avoidance = sum(count_row_if(0, dat$Head_avoidance))/countFunction(dat$Head_avoidance), 
+    Head_stretch = sum(count_row_if(0, dat$Head_stretch))/countFunction(dat$Head_stretch), 
+    Head_movement = sum(count_row_if(0, dat$Head_movement))/countFunction(dat$Head_movement),
     Force = sum(count_row_if(0, dat$Force))/countFunction(dat$Force), 
     Rear = sum(count_row_if(0, dat$Rear))/countFunction(dat$Rear)
   )
+  
 
 zeros
 ```
 
 ### Histograms
 ```{r, echo = F}
+#find breaks
+breaks <- 
+  pretty(
+    range(subset(dat, !is.na(Head_stretch))$Head_stretch), 
+    n = nclass.FD(subset(dat, !is.na(Head_stretch))$Head_stretch), 
+    min.n = 1
+  )
+
+bwidth <- breaks[2] - breaks[1]
+
 #natural scale
 plot.1 <- 
   ggplot(dat, aes(Burn_time)) +
-  geom_histogram(aes(y = ..density..), binwidth = 1) +
+  geom_histogram(aes(y = ..density..), binwidth = 2) +
   geom_density() +
   labs(title = NULL, x = "Burn time, s")
 
@@ -207,36 +334,48 @@ plot.2 <-
 
 plot.3 <- 
   ggplot(dat, aes(Vocal)) +
-  geom_histogram(aes(y = ..density..), binwidth = .08) +
+  geom_histogram(aes(y = ..density..), binwidth = .5) +
   geom_density() +
-  labs(title = NULL, x = "Vocalize, count/s")
+  labs(title = NULL, x = "Vocalize, count")
 
 plot.4 <- 
   ggplot(dat, aes(Kick)) +
-  geom_histogram(aes(y = ..density..), binwidth = .08) +
+  geom_histogram(aes(y = ..density..), binwidth = .5) +
   geom_density() +
-  labs(title = NULL, x = "Kick, count/s")
+  labs(title = NULL, x = "Kick, count")
 
 plot.5 <- 
   ggplot(dat, aes(Tail_wag)) +
-  geom_histogram(aes(y = ..density..), binwidth = .4) +
+  geom_histogram(aes(y = ..density..), binwidth = 10) +
   geom_density() +
-  labs(title = NULL, x = "Tail_wag, count/s")
+  labs(title = NULL, x = "Tail_wag, count")
 
 plot.6 <- 
   ggplot(dat, aes(Head_movement)) +
-  geom_histogram(aes(y = ..density..), binwidth = .08) +
+  geom_histogram(aes(y = ..density..), binwidth = 1) +
   geom_density() +
-  labs(title = NULL, x = "Head movement, count/s")
+  labs(title = NULL, x = "Head movement, count")
 
 plot.7 <- 
   ggplot(dat, aes(Force)) +
-  geom_histogram(aes(y = ..density..), binwidth = .05) +
+  geom_histogram(aes(y = ..density..), binwidth = .5) +
   geom_density() +
-  labs(title = NULL, x = "Force ahead, count/s")
+  labs(title = NULL, x = "Force ahead, count")
+
+plot.8 <- 
+  ggplot(dat, aes(Head_stretch)) +
+  geom_histogram(aes(y = ..density..), binwidth = .5) +
+  geom_density() +
+  labs(title = NULL, x = "Head stretch, count")
+
+plot.9 <- 
+  ggplot(dat, aes(Head_avoidance)) +
+  geom_histogram(aes(y = ..density..), binwidth = 1) +
+  geom_density() +
+  labs(title = NULL, x = "Head avoidance, count")
 
 
-plots <- cowplot::plot_grid(plot.1, plot.2, plot.3, plot.4, plot.5, plot.6, plot.7)
+plots <- cowplot::plot_grid(plot.1, plot.2, plot.3, plot.4, plot.5, plot.6, plot.7, plot.8, plot.9)
 
 title <- 
   cowplot::ggdraw() + 
@@ -255,153 +394,438 @@ cowplot::plot_grid(
   rel_heights = c(0.1, 1)
 )
 
-remove(plot.1, plot.2, plot.3, plot.4, plot.5, plot.6, plot.7)
+remove(plot.1, plot.2, plot.3, plot.4, plot.5, plot.6, plot.7, plot.8, plot.9)
 ```
 
 ## Analyses
-### Burn time (Gaussian)
+### Burn time (lme)
 ```{r}
-#model
 model <- 
-  glmmTMB(
-    Burn_time ~ Treatment + (1|Hutch), 
-    family = gaussian, 
+  lme(
+    Burn_time ~ Treatment, 
     data = dat, 
-    verbose = F, 
-    REML = T
+    random = ~1|Hutch,
+    na.action = na.omit,
+    method = "REML"
   )
 
-##check residuals
-simulationOutput <- simulateResiduals(model)
-plot(simulationOutput) 
+#diagnostics
+plot(model, main = "Residuals vs fitted")
+qqnorm(resid(model))
+qqline(resid(model))
+
+
+#compare models with added FE
+model.ML <-
+  update(
+    model,
+    method = "ML"
+  )
+
+model2 <-
+  update(
+    model.ML, 
+    Burn_time ~ Treatment + Order
+  )
+
+model3 <-
+  update(
+    model.ML, 
+    Burn_time ~ Treatment + Age
+  )
+
+model4 <-
+  update(
+    model.ML, 
+    Burn_time ~ Treatment + Breed
+  )
+
+AICtab(model.ML, model2, model3, model4) #model without added FE is best
+
 
 #output
-summary(model)
-car::Anova(model, type = 3, test.statistic = "Chisq")
+#summary(model)
+anova <- anova.lme(model)
+round(anova, 3)
 
 #lsmeans
 lsmeans <- emmeans(model, ~ Treatment, type = "response")
 lsmeans
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
-
-remove(model, anova, lsmeans, lsmeans_df)
 ```
 
-### Tail wag (nb1)
+### Total handling time (lme)
+```{r}
+model <- 
+  lme(
+    Handle_time ~ Treatment, 
+    data = dat, 
+    random = ~1|Hutch,
+    na.action = na.omit,
+    method = "REML"
+  )
+
+#diagnostics
+plot(model, main = "Residuals vs fitted")
+qqnorm(resid(model))
+qqline(resid(model))
+
+
+#compare models with added FE
+model.ML <-
+  update(
+    model,
+    method = "ML"
+  )
+
+model2 <-
+  update(
+    model.ML, 
+    . ~ Treatment + Order
+  )
+
+model3 <-
+  update(
+    model.ML, 
+    . ~ Treatment + Age
+  )
+
+model4 <-
+  update(
+    model.ML, 
+    . ~ Treatment + Breed
+  )
+
+AICtab(model.ML, model2, model3, model4) #model without added FE is best
+
+#output
+#summary(model)
+anova <- anova.lme(model)
+round(anova, 3)
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
+lsmeans
+```
+
+### Tail wag (zi nb1)
 ```{r}
 model <- 
   glmmTMB(
-    Tail_wag ~ Treatment + (1|Hutch) + offset(log(Handle_time)), 
+    Tail_wag ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)), 
     family = poisson, 
     data = dat, 
     verbose = F, 
-    REML = T
+    REML = T,
+    na.action = na.omit
   )
 
-###check residuals
+#residuals
 simulationOutput <- simulateResiduals(model)
 plot(simulationOutput) #overdispersion
 
-##add overdispersion:
-###individual-level random effect 
+
+#add overdispersion correction
+##individual-level random effect 
 model.OD <- 
   update(
     model, 
-    Tail_wag ~ Treatment + (1|Hutch) + (1|ID) + offset(log(Handle_time))
+    . ~ Treatment + (1|Hutch) + (1|ID) + offset(log(Handle_time_impute))
   )
 
-###use negative binomial distribution with quadratic parameterization (Hardin & Hilbe 2007)
+##negative binomial distribution with quadratic parameterization (Hardin & Hilbe 2007)
 model.nb2 <- 
   update(model, 
          family = nbinom2
   )
 
-###use negative binomial distribution with linear parameterization (Hardin & Hilbe 2007) 
+##negative binomial distribution with linear parameterization (Hardin & Hilbe 2007) 
 model.nb1 <- 
   update(
-    model, family = nbinom1
+    model, 
+    family = nbinom1
   )
 
-##compare models
-AICtab(model, model.OD, model.nb2, model.nb1)
+AICtab(model, model.OD, model.nb2, model.nb1) #nb1 is best
 
+
+#residuals
 simulationOutput <- simulateResiduals(model.nb1)
 plot(simulationOutput) 
 
-testZeroInflation(simulationOutput, plot = F)
-testDispersion(simulationOutput, plot = F)
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") #excess zeros
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+
+#add zero-inflation parameter
+model.zi <-
+  update(
+    model.nb1,
+    ziformula = ~1
+  )
+
+AICtab(model.nb1, model.zi) #zi is best
+
+
+#residuals
+simulationOutput <- simulateResiduals(model.zi)
+plot(simulationOutput) 
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+model <- model.zi
+
+
+#compare models with added FE
+model.ML <-
+  update(
+    model,
+    REML = F
+  )
+
+model2 <-
+  update(
+    model.ML, 
+    Tail_wag ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Order
+  )
+
+model3 <-
+  update(
+    model.ML, 
+    Tail_wag ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Age
+  )
+
+model4 <-
+  update(
+    model.ML, 
+    Tail_wag ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Breed
+  )
+
+AICtab(model.ML, model2, model3, model4) #model without added FE is best
+
+
+#compare models with added RE
+model5 <-
+  update(
+    model, 
+    Tail_wag ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + (1|Breed)
+  )
+
+AICtab(model, model5) #model without added RE is best
+
 
 #output
-summary(model.nb1)
-car::Anova(model.nb1, type = 3, test.statistic = "Chisq")
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
 
 #lsmeans
-lsmeans <- emmeans(model.nb1, ~ Treatment, type = "response", offset = log(1))
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
+lsmeans <- emmeans(model, ~ Treatment, type = "response", offset = log(10))
+lsmeans
 ```
 
 ### Head avoidance (Poisson)
 ```{r}
-#test models
-##base model
 model <- 
   glmmTMB(
-    Head_avoidance ~ Treatment + (1|Hutch) + offset(log(Handle_time)), 
+    Head_avoidance ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)), 
     family = poisson, 
     data = dat, 
     verbose = F, 
     REML = T
   )
 
-###check residuals
+
+#check residuals
 simulationOutput <- simulateResiduals(model)
 plot(simulationOutput)
 
-testDispersion(simulationOutput, plot = F)
+testDispersion(simulationOutput, plot = F, alternative = "greater")
 
-testZeroInflation(simulationOutput, plot = F) 
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+
+
+#compare models with added FE
+model.ML <-
+  update(
+    model,
+    REML = F
+  )
+
+model2 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Order
+  )
+
+model3 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Age
+  )
+
+model4 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Breed
+  )
+
+AICtab(model.ML, model2, model3, model4) #model without added FE is best
+
+
+#compare models with added RE
+model5 <-
+  update(
+    model, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + (1|Breed)
+  )
+
+AICtab(model, model5) #model without added RE is best
+
 
 #output
-summary(model)
+#summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response", offset = log(10))
+lsmeans
+```
+
+### Head stretch (Poisson)
+```{r}
+model <- 
+  glmmTMB(
+    Head_stretch ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)), 
+    family = poisson, 
+    data = dat, 
+    verbose = F, 
+    REML = T
+  )
+
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+
+
+#compare models with added FE
+model.ML <-
+  update(
+    model,
+    REML = F
+  )
+
+model2 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Order
+  )
+
+model3 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Age
+  )
+
+model4 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Breed
+  )
+
+AICtab(model.ML, model2, model3, model4) #model without added FE is best
+
+
+#compare models with added RE
+model5 <-
+  update(
+    model, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + (1|Breed)
+  )
+
+AICtab(model, model5) #model without added RE is best
+
+
+#output
+#summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response", offset = log(10))
+lsmeans
+```
+
+### Total head movement (Poisson)
+```{r}
+#test models
+model <- 
+  glmmTMB(
+    Head_movement ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)), 
+    family = poisson, 
+    data = dat, 
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+
+#compare models with added FE
+model.ML <-
+  update(
+    model,
+    REML = F
+  )
+
+model2 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Order
+  )
+
+model3 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Age
+  )
+
+model4 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Breed
+  )
+
+AICtab(model.ML, model2, model3, model4) #model without added FE is best
+
+#compare models with added RE
+#model5 <-
+  #update(
+    #model, 
+   # . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + (1|Breed)
+ # )
+
+#AICtab(model, model5) #model without added RE is best
+
+
+#output
+#summary(model)
 car::Anova(model, type = 3, test.statistic = "Chisq")
 
 #lsmeans
-lsmeans <- emmeans(model, ~ Treatment, type = "response", offset = log(1))
+lsmeans <- emmeans(model, ~ Treatment, type = "response", offset = log(10))
 lsmeans
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
 ```
 
 ### Force (Poisson)
@@ -410,7 +834,7 @@ multcomp::cld(lsmeans, alpha = .05)
 ##base model
 model <- 
   glmmTMB(
-    Force ~ Treatment + (1|Hutch) + offset(log(Handle_time)), 
+    Force ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)), 
     family = poisson, 
     data = dat, 
     verbose = F, 
@@ -421,85 +845,81 @@ model <-
 simulationOutput <- simulateResiduals(model)
 plot(simulationOutput)
 
-testDispersion(simulationOutput, plot = F)
+testDispersion(simulationOutput, plot = F, alternative = "greater")
 
-testZeroInflation(simulationOutput, plot = F)
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#compare models with added FE
+model.ML <-
+  update(
+    model,
+    REML = F
+  )
+
+model2 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Order
+  )
+
+model3 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Age
+  )
+
+model4 <-
+  update(
+    model.ML, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + Breed
+  )
+
+AICtab(model.ML, model2, model3, model4) #model without added FE is best
+
+#compare models with added RE
+model5 <-
+  update(
+    model, 
+    . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + (1|Breed)
+ )
+
+AICtab(model, model5) #model without added RE is best
 
 #output
-summary(model)
+#summary(model)
 car::Anova(model, type = 3, test.statistic = "Chisq")
 
 #lsmeans
-lsmeans <- emmeans(model, ~ Treatment, type = "response", offset = log(1))
+lsmeans <- emmeans(model, ~ Treatment, type = "response", offset = log(10))
 lsmeans
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
 ```
 
-### Kick (Poisson)
+### Kick 
 ```{r}
-#test models
-model <- 
-  glmmTMB(
-    Kick ~ Treatment + (1|Hutch) + offset(log(Handle_time)), 
-    family = poisson, 
-    data = dat, 
-    verbose = F, 
-    REML = T
-  )
-
-###check residuals
-simulationOutput <- simulateResiduals(model)
-plot(simulationOutput)
-
-testDispersion(simulationOutput, plot = F)
-
-testZeroInflation(simulationOutput, plot = F)
-
-#output
-summary(model)
-car::Anova(model, type = 3, test.statistic = "Chisq")
-
-#lsmeans
-lsmeans <- emmeans(model, ~ Treatment, type = "response", offset = log(1))
-lsmeans
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
+dat$KickRate <-(dat$Kick/dat$Handle_time_impute)*10
+  
+describeBy(dat$KickRate, group = dat$Treatment)
 ```
 
 ### Vocal
 ```{r, echo = F}
-describeBy(dat$Vocal, group = dat$Treatment, fast = T)
+dat$VocalRate <-(dat$Vocal/dat$Handle_time_impute)*10
+
+describeBy(dat$VocalRate, group = dat$Treatment)
 ```
 
 ### Fall
 ```{r, echo = F}
-describeBy(dat$Fall, group = dat$Treatment, fast = T)
+dat$FallRate <-(dat$Fall/dat$Handle_time_impute)*10
+
+describeBy(dat$FallRate, group = dat$Treatment)
 ```
 
 ### Rear
 ```{r, echo = F}
-describeBy(dat$Rear, group = dat$Treatment, fast = T)
+dat$RearRate <-(dat$Rear/dat$Handle_time_impute)*10
+
+describeBy(dat$RearRate, group = dat$Treatment)
 ```
 
 
@@ -514,26 +934,52 @@ dat <-
   mutate_at(c("ID", "Breed", "Trt", "Hutch"), as.factor) %>%
   mutate(Interval = as.numeric(Interval)) %>%
   rename(Minute = Interval) %>%
+  rename(Treatment = Trt) %>%
   mutate(Head_movement = Jerk + Shake + Rub) %>%
   mutate(Transitions = Up + Down) %>%
   mutate(Oral = Groom + Water + Straw + Oral) %>%
-  select(-c(Date, Age, Dehorn_time, Order, Hour, Tail, Jerk, Shake, Rub, Groom, Water, Straw, Up, Down))
+  select(-c(Date, Dehorn_time, Hour, Tail, Groom, Water, Straw)) %>%
+  mutate(
+    Treatment = ifelse(Treatment == "D", "Tincture", 
+                       ifelse(Treatment == "L", "Lidocaine", 
+                              ifelse(Treatment == "S", "Sham", NA)))
+  ) %>%
+  mutate(Treatment = as.factor(Treatment)) %>%
+  filter(Minute < 360)
+
+#count number of observations per calf
+countFunction <- function(countIfNotNA){sum(!is.na(countIfNotNA))}
+
+obs.count <- filter(dat, Minute > 0) %>%
+  select(-c(Breed, Age, Treatment, Hutch, Order, Minute)) %>%
+  group_by(ID) %>%
+  summarise_all(funs(countFunction(.))) %>%
+  rename_if(is.numeric, list(~paste0(., "Count")))
 
 
+#create baseline data
 baseline_dat <- dat %>%
   filter(Minute < 0) %>%
-  group_by(ID, Breed, Trt, Hutch) %>%
+  group_by(ID, Breed, Age, Treatment, Hutch, Order) %>%
   summarise_all(funs(mean(., na.rm = T))) %>%
   select(-Minute) %>%
-  rename_if(is.numeric, list(~paste0(., "Baseline")))
+  rename_if(is.numeric, list(~paste0(., "Baseline"))) %>%
+  rename("Age" = "AgeBaseline") %>%
+  rename("Order" = "OrderBaseline")
+  
 
 #impute mean baseline value for missing observations
-mean_baseline <- as.data.frame(t(colMeans(filter(dat, Minute < 0)[6:14], na.rm = T)))
+mean_baseline <- as.data.frame(t(colMeans(filter(dat, Minute < 0)[8:21], na.rm = T)))
 
 baseline_dat <- baseline_dat %>%
+  mutate(JerkBaseline = ifelse(is.na(JerkBaseline), mean_baseline$Jerk, JerkBaseline)) %>%
+  mutate(ShakeBaseline = ifelse(is.na(ShakeBaseline), mean_baseline$Shake, ShakeBaseline)) %>%
+  mutate(RubBaseline = ifelse(is.na(RubBaseline), mean_baseline$Rub, RubBaseline)) %>%
   mutate(Hoof_rubBaseline = ifelse(is.na(Hoof_rubBaseline), mean_baseline$Hoof_rub, Hoof_rubBaseline)) %>%
   mutate(EarBaseline = ifelse(is.na(EarBaseline), mean_baseline$Ear, EarBaseline)) %>%
+  mutate(DownBaseline = ifelse(is.na(DownBaseline), mean_baseline$Down, DownBaseline)) %>%
   mutate(Down_secBaseline = ifelse(is.na(Down_secBaseline), mean_baseline$Down_sec, Down_secBaseline)) %>%
+  mutate(UpBaseline = ifelse(is.na(UpBaseline), mean_baseline$Up, UpBaseline)) %>%
   mutate(Up_secBaseline = ifelse(is.na(Up_secBaseline), mean_baseline$Up_sec, Up_secBaseline)) %>%
   mutate(OralBaseline = ifelse(is.na(OralBaseline), mean_baseline$Oral, OralBaseline)) %>%
   mutate(Rum_secBaseline = ifelse(is.na(Rum_secBaseline), mean_baseline$Rum_sec, Rum_secBaseline)) %>%
@@ -542,39 +988,32 @@ baseline_dat <- baseline_dat %>%
   mutate(TransitionsBaseline = ifelse(is.na(TransitionsBaseline), mean_baseline$Transitions, TransitionsBaseline))
 
 dat <- 
-  left_join(dat, baseline_dat, by = c("ID", "Breed", "Trt", "Hutch")) %>%
+  left_join(dat, baseline_dat, by = c("ID", "Breed", "Age", "Treatment", "Hutch", "Order")) %>%
   filter(Minute > 0)
+
+dat <- 
+  left_join(dat, obs.count)
+
+#dat$Minute.f <- factor(dat$Minute)
 ```
 
 ## Summary of data
 ```{r}
 summary <- 
   cbind(
-    vars = rownames(describe(dat[, 6:14], fast = T)), 
-    describe(dat[, 6:14], fast = T) %>%
+    vars = rownames(describe(dat[, 8:21], fast = T)), 
+    describe(dat[, 8:21], fast = T) %>%
       mutate(var = sd^2) %>%
       mutate_if(is.numeric, round, digits = 2)
   )
 summary
-```
 
-### Proportion of zeros for behaviors
-```{r, echo = T}
-countFunction <- function(countIfNotNA){sum(!is.na(countIfNotNA))}
-
-zeros <- 
-  rbind(
-    Hoof_rub = sum(count_row_if(0, dat$Hoof_rub))/countFunction(dat$Hoof_rub), 
-    Ear = sum(count_row_if(0, dat$Ear))/countFunction(dat$Ear), 
-    Down_sec = sum(count_row_if(0, dat$Down_sec))/countFunction(dat$Down_sec), 
-    Up_sec = sum(count_row_if(0, dat$Up_sec))/countFunction(dat$Up_sec), 
-    Oral = sum(count_row_if(0, dat$Oral))/countFunction(dat$Oral), 
-    Rum_sec = sum(count_row_if(0, dat$Rum_sec))/countFunction(dat$Rum_sec), 
-    Head_movement = sum(count_row_if(0, dat$Head_movement))/countFunction(dat$Head_movement), 
-    Transitions = sum(count_row_if(0, dat$Transitions))/countFunction(dat$Transitions)
-  )
-
-zeros
+#count number of observations per Minute
+count.min <- dat %>%
+  select(-c(ID, Breed, Age, Treatment, Hutch, Order)) %>%
+  group_by(Minute) %>%
+  summarise_all(funs(countFunction(.))) %>%
+  rename_if(is.numeric, list(~paste0(., "Count")))
 ```
 
 ### Histograms
@@ -608,7 +1047,7 @@ plot.5 <-
   ggplot(dat, aes(Oral)) +
   geom_histogram(aes(y = ..density..), binwidth = 1) +
   geom_density() +
-  labs(title = NULL, x = "All oral behaviors, count")
+  labs(title = NULL, x = "Oral behaviors, count")
 
 plot.6 <- 
   ggplot(dat, aes(Rum_sec)) +
@@ -660,641 +1099,98 @@ remove(plot.1, plot.2, plot.3, plot.4, plot.5, plot.6, plot.7, plot.8, plot.9)
 ## Analyses
 Steps:  
 
-* Start with Poisson family and cubic order model with unstructured covariance structure      
-* If overdispersion is present, then fit with a nb model   
-* Compare AIC of models with covariance structures (un, diag, cs, and ar1)    
-
-### Ear flicks (poisson, ar1)
-```{r, echo = F}
-#test models
-model <- 
-  glmmTMB(
-    Ear ~ EarBaseline + Trt*poly(Minute, 3) + (1|Hutch) + (Minute - 1|ID), 
-    family = poisson, 
-    data = subset(dat, !is.na(Ear)),
-    verbose = F, 
-    REML = T
-  )
-
-##check residuals
-simulationOutput <- simulateResiduals(model)
-
-plot(simulationOutput)
-
-testDispersion(simulationOutput, plot = F)
-
-testZeroInflation(simulationOutput, plot = F) 
-
-testTemporalAutocorrelation(simulationOutput, plot = F, time = seq(20, 360, by = 20))
-```
-
-Compare models with different covariance structures:  
-```{r, echo = F}
-##compare cov structures
-model.diag <- 
-  update(
-    model,
-    Ear ~ EarBaseline + Trt*poly(Minute, 3) + (1|Hutch) + diag(as.factor(Minute) - 1|ID)
-  )
-
-model.ar1 <- 
-  update(
-    model,
-    Ear ~ EarBaseline + Trt*poly(Minute, 3) + (1|Hutch) + ar1(as.factor(Minute) - 1|ID)
-  )
-
-model.cs <- 
-  update(
-    model,
-    Ear ~ EarBaseline + Trt*poly(Minute, 3) + (1|Hutch) + cs(as.factor(Minute) - 1|ID)
-  )
-
-AICtab(model, model.diag, model.ar1, model.cs)
-
-##check residuals
-simulationOutput <- simulateResiduals(model.ar1)
-
-plot(simulationOutput)
-
-testDispersion(simulationOutput, plot = F)
-
-testZeroInflation(simulationOutput, plot = F) 
-
-testTemporalAutocorrelation(simulationOutput, plot = F, time = seq(20, 360, by = 20)) 
-```
-
-Ar1 is best  
-```{r, echo = F}
-#output
-summary(model.ar1)
-
-car::Anova(model.ar1, type = 3, test.statistic = "Chisq")
-
-#lsmeans
-lsmeans <- emmeans(model.ar1, ~ Trt|Minute, type = "response", at = list(Minute = seq(20, 360, by = 20)))
-lsmeans
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
-```
-
-```{r, echo = F}
-#predict Y
-newDat <- 
-  emmip(
-    model.ar1, 
-    Trt ~ Minute, 
-    at = list(Minute = seq(20, 360, by = 20)), 
-    CIs = TRUE, 
-    plotit = FALSE, 
-    type = "response",
-    level = .8
-  ) %>%
-  rename("Treatment" = "Trt") %>%
-  mutate(Treatment = ifelse(Treatment == "D", "Tincture", ifelse(Treatment == "L", "Lidocaine", ifelse(Treatment == "S", "Sham", NA))))
-
-#make plot
-ggplot(data = newDat, 
-       aes(x = Minute, y = yvar, color = Treatment)) + 
-  
-  scale_color_npg() +
-  
-  geom_line(size = 1) + 
-  
-  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
-              alpha = 0.1, 
-              inherit.aes = T,
-              colour = NA) +
-  
-  labs(title = "Ear flicks",
-       x = "Time after disbudding, min", 
-       y = "Ear flicks, count per 5 min") +
-  
-  scale_y_continuous(breaks = seq(0, 30, 10), minor_breaks = seq(0, 30, 5), limits = c(0, NA)) +
-  
-  scale_x_continuous(breaks = seq(20, 360, 40)) +
-  
-  theme(
-    plot.title = element_text(hjust = .5)
-  ) +
-  
-  ggsave("ear_flicks.png", width = 8, height = 5)
-```
-
-### Exaggerated head movements (poisson, ar1)
-```{r, echo = F}
-##base model
-model <- 
-  glmmTMB(
-    Head_movement ~ Head_movementBaseline + Trt*poly(Minute, 3) + (1|Hutch) + (Minute - 1|ID), 
-    family = poisson, 
-    data = subset(dat, !is.na(Head_movement)),
-    verbose = F, 
-    REML = T
-  )
-
-##check residuals
-simulationOutput <- simulateResiduals(model)
-
-plot(simulationOutput)
-
-testDispersion(simulationOutput, plot = F)
-
-testZeroInflation(simulationOutput, plot = F)
-
-testTemporalAutocorrelation(simulationOutput, plot = F, time = seq(20, 360, by = 20))
-```
-
-Compare models with different covariance structures:  
-```{r, echo = F}
-##compare cov structures
-model.diag <- 
-  update(
-    model,
-    Head_movement ~ Head_movementBaseline + Trt*poly(Minute, 3) + (1|Hutch) + diag(as.factor(Minute) - 1|ID)
-  )
-
-model.ar1 <- 
-  update(
-    model,
-    Head_movement ~ Head_movementBaseline + Trt*poly(Minute, 3) + (1|Hutch) + ar1(as.factor(Minute) - 1|ID)
-  )
-
-model.cs <- 
-  update(
-    model,
-    Head_movement ~ Head_movementBaseline + Trt*poly(Minute, 3) + (1|Hutch) + cs(as.factor(Minute) - 1|ID)
-  )
-
-AICtab(model, model.diag, model.ar1, model.cs)
-
-##check residuals
-simulationOutput <- simulateResiduals(model.ar1)
-
-plot(simulationOutput)
-
-testDispersion(simulationOutput, plot = F)
-
-testZeroInflation(simulationOutput, plot = F) 
-
-testTemporalAutocorrelation(simulationOutput, plot = F, time = seq(20, 360, by = 20)) 
-```
-
-Ar1 is best  
-```{r, echo = F}
-#output
-summary(model.ar1)
-
-car::Anova(model.ar1, type = 3, test.statistic = "Chisq")
-
-#lsmeans
-lsmeans <- emmeans(model.ar1, ~ Trt|Minute, type = "response", at = list(Minute = seq(20, 360, by = 20)))
-lsmeans
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
-```
-
-```{r, echo = F}
-#predict Y
-newDat <- 
-  emmip(
-    model.ar1, 
-    Trt ~ Minute, 
-    at = list(Minute = seq(20, 360, by = 20)), 
-    CIs = TRUE, 
-    plotit = FALSE, 
-    type = "response",
-    level = .8
-  ) %>%
-  rename("Treatment" = "Trt") %>%
-  mutate(Treatment = ifelse(Treatment == "D", "Tincture", ifelse(Treatment == "L", "Lidocaine", ifelse(Treatment == "S", "Sham", NA))))
-
-#make plot
-ggplot(data = newDat, 
-       aes(x = Minute, y = yvar, color = Treatment)) + 
-  
-  scale_color_npg() +
-  
-  geom_line(size = 1) + 
-  
-  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
-              alpha = 0.1, 
-              inherit.aes = T,
-              colour = NA) +
-  
-  labs(title = "Exaggerated head movements",
-       x = "Time after disbudding, min", 
-       y = "Exaggerated head movements, count per 5 min") +
-  
-  scale_y_continuous(breaks = seq(0, 7, 2), minor_breaks = seq(0, 7, 1), limits = c(0, 7)) +
-  
-  scale_x_continuous(breaks = seq(20, 360, 40)) +
-  
-  theme(
-    plot.title = element_text(hjust = .5)
-  ) +
-  
-  ggsave("head_movements.png", width = 8, height = 5)
-```
-
-### Oral behaviors (nb2, un)
-```{r, echo = F}
-#test models
-model <- 
-  glmmTMB(
-    Oral ~ OralBaseline + Trt*poly(Minute, 3) + (1|Hutch) + (Minute - 1|ID), 
-    family = poisson, 
-    data = subset(dat, !is.na(Oral)),
-    verbose = F, 
-    REML = T
-  )
-
-##check residuals
-simulationOutput <- simulateResiduals(model)
-
-plot(simulationOutput)
-
-testDispersion(simulationOutput, plot = F)
-
-testZeroInflation(simulationOutput, plot = F)
-
-testTemporalAutocorrelation(simulationOutput, plot = F, time = seq(20, 360, by = 20))
-```
-
-Compare nb binomial models:  
-```{r, echo = F}
-#test models
-model.nb2 <- 
-  glmmTMB(
-    Oral ~ OralBaseline + Trt*poly(Minute, 3) + (1|Hutch) + (Minute - 1|ID), 
-    family = nbinom2, 
-    data = subset(dat, !is.na(Oral)),
-    verbose = F, 
-    REML = T
-  )
-
-model.nb1 <- 
-  glmmTMB(
-    Oral ~ OralBaseline + Trt*poly(Minute, 3) + (1|Hutch) + (Minute - 1|ID), 
-    family = nbinom1, 
-    data = subset(dat, !is.na(Oral)),
-    verbose = F, 
-    REML = T
-  )
-
-AICtab(model, model.nb2, model.nb1)
-
-##check residuals
-simulationOutput <- simulateResiduals(model.nb2)
-
-plot(simulationOutput)
-
-testDispersion(simulationOutput, plot = F)
-
-testZeroInflation(simulationOutput, plot = F)
-
-testTemporalAutocorrelation(simulationOutput, plot = F, time = seq(20, 360, by = 20))
-```
-
-Compare models with different covariance structures:  
-```{r, echo = F}
-##compare cov structures
-model.diag <- 
-  update(
-    model.nb2,
-    Oral ~ OralBaseline + Trt*poly(Minute, 3) + (1|Hutch) + diag(as.factor(Minute) - 1|ID)
-  )
-
-model.ar1 <- 
-  update(
-    model.nb2,
-    Oral ~ OralBaseline + Trt*poly(Minute, 3) + (1|Hutch) + ar1(as.factor(Minute) - 1|ID)
-  )
-
-model.cs <- 
-  update(
-    model.nb2,
-    Oral ~ OralBaseline + Trt*poly(Minute, 3) + (1|Hutch) + cs(as.factor(Minute) - 1|ID)
-  )
-
-AICtab(model.nb2, model.diag, model.ar1, model.cs)
-```
-
-Unstructured covariance structure is best  
-```{r, echo = F}
-#output
-summary(model.nb2)
-
-car::Anova(model.nb2, type = 3, test.statistic = "Chisq")
-
-#lsmeans
-lsmeans <- emmeans(model.nb2, ~ Trt|Minute, type = "response", at = list(Minute = seq(20, 360, by = 20)))
-lsmeans
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
-```
-
-```{r, echo = F}
-#predict Y
-newDat <- 
-  emmip(
-    model.nb2, 
-    Trt ~ Minute, 
-    at = list(Minute = seq(20, 360, by = 20)), 
-    CIs = TRUE, 
-    plotit = FALSE, 
-    type = "response",
-    level = .8
-  ) %>%
-  rename("Treatment" = "Trt") %>%
-  mutate(Treatment = ifelse(Treatment == "D", "Tincture", ifelse(Treatment == "L", "Lidocaine", ifelse(Treatment == "S", "Sham", NA))))
-
-#make plot
-ggplot(data = newDat, 
-       aes(x = Minute, y = yvar, color = Treatment)) + 
-  
-  scale_color_npg() +
-  
-  geom_line(size = 1) + 
-  
-  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
-              alpha = 0.1, 
-              inherit.aes = T,
-              colour = NA) +
-  
-  labs(title = "Oral behaviors",
-       x = "Time after disbudding, min", 
-       y = "Oral behaviors, count per 5 min") +
-  
-  scale_y_continuous(breaks = seq(0, 15, 5), minor_breaks = seq(0, 15, 1), limits = c(0, NA)) +
-  
-  scale_x_continuous(breaks = seq(20, 360, 40)) +
-  
-  theme(
-    plot.title = element_text(hjust = .5)
-  ) +
-  
-  ggsave("oral_behaviors.png", width = 8, height = 5)
-```
-
-### Scratching bud with hind hoof (nb1, ar1)
+* Start with Poisson family and linear model with ar1 covariance structure  
+* If overdispersion or zi is present, then compare nb and zi models  
+* Fit ML model to compare removal of baseline term and polynomial terms  
+* Add hutch*treatment interaction as RE if it improves residuals
+    
+
+### Ear flicks
 ```{r, include = F}
-#test models
+
+#fit model
 model <- 
   glmmTMB(
-    Hoof_rub ~ Hoof_rubBaseline + Trt*poly(Minute, 3) + (1|Hutch) + (Minute - 1|ID), 
+    Ear ~ scale(EarBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
     family = poisson, 
-    data = subset(dat, !is.na(Hoof_rub)),
+    data = dat,
     verbose = F, 
     REML = T
   )
 
-##check residuals
+#check residuals
 simulationOutput <- simulateResiduals(model)
-
 plot(simulationOutput)
 
-testDispersion(simulationOutput, plot = F)
+testDispersion(simulationOutput, plot = F, alternative = "greater")
 
-testZeroInflation(simulationOutput, plot = F)
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
 
-testTemporalAutocorrelation(simulationOutput, plot = F, time = seq(20, 360, by = 20))
-```
 
-Compare nb binomial models:  
-```{r, echo = F}
-#test models
-model.nb2 <- 
+#compare additional FE
+model.q <-
   update(
     model, 
-    family = nbinom2
+    . ~ scale(EarBaseline) + Treatment*Minute + Treatment*I(Minute^2) + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
   )
 
-model.nb1 <- 
+model.c <-
   update(
     model, 
-    family = nbinom1
+    . ~ scale(EarBaseline) + Treatment*Minute + Treatment*I(Minute^2) + Treatment*I(Minute^3) + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
   )
 
-AICtab(model, model.nb2, model.nb1)
-
 ##check residuals
-simulationOutput <- simulateResiduals(model.nb1)
-
+simulationOutput <- simulateResiduals(model.q) #quadratic model improves residuals drastically
 plot(simulationOutput)
 
-testDispersion(simulationOutput, plot = F)
+##check residuals
+simulationOutput <- simulateResiduals(model.c) #cubic model does not improve residuals
+plot(simulationOutput)
 
-testZeroInflation(simulationOutput, plot = F)
-
-testTemporalAutocorrelation(simulationOutput, plot = F, time = seq(20, 360, by = 20))
-```
-
-Compare models with different covariance structures:  
-```{r, echo = F}
-##compare cov structures
-model.diag <- 
+#Add RE
+model.RE <-
   update(
-    model.nb1,
-    Hoof_rub ~ Hoof_rubBaseline + Trt*poly(Minute, 3) + (1|Hutch) + diag(as.factor(Minute) - 1|ID)
+    model, 
+    . ~ scale(EarBaseline) + Treatment*Minute + Treatment*I(Minute^2) + (1|Hutch/Treatment) + (1|ID) + ar1(as.factor(Minute)-1|ID)
   )
-
-model.ar1 <- 
-  update(
-    model.nb1,
-    Hoof_rub ~ Hoof_rubBaseline + Trt*poly(Minute, 3) + (1|Hutch) + ar1(as.factor(Minute) - 1|ID)
-  )
-
-model.cs <- 
-  update(
-    model.nb1,
-    Hoof_rub ~ Hoof_rubBaseline + Trt*poly(Minute, 3) + (1|Hutch) + cs(as.factor(Minute) - 1|ID)
-  )
-
-AICtab(model.nb1, model.diag, model.ar1, model.cs)
 
 ##check residuals
-simulationOutput <- simulateResiduals(model.ar1)
-
+simulationOutput <- simulateResiduals(model.RE) #improves residuals drastically
 plot(simulationOutput)
 ```
 
-Ar1 covariance structure is best  
-```{r, echo = F}
-#output
-summary(model.ar1)
-
-car::Anova(model.ar1, type = 3, test.statistic = "Chisq")
-
-#lsmeans
-lsmeans <- emmeans(model.ar1, ~ Trt|Minute, type = "response", at = list(Minute = seq(20, 360, by = 20)))
-lsmeans
-lsmeans_df <- as.data.frame(lsmeans)
-
-#means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
-```
-
-```{r, echo = F}
-#predict Y
-newDat <- 
-  emmip(
-    model.ar1, 
-    Trt ~ Minute, 
-    at = list(Minute = seq(20, 360, by = 20)), 
-    CIs = TRUE, 
-    plotit = FALSE, 
-    type = "response",
-    level = .8
-  ) %>%
-  rename("Treatment" = "Trt") %>%
-  mutate(Treatment = ifelse(Treatment == "D", "Tincture", ifelse(Treatment == "L", "Lidocaine", ifelse(Treatment == "S", "Sham", NA))))
-
-#make plot
-ggplot(data = newDat, 
-       aes(x = Minute, y = yvar, color = Treatment)) + 
-  
-  scale_color_npg() +
-  
-  geom_line(size = 1) + 
-  
-  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
-              alpha = 0.1, 
-              inherit.aes = T,
-              colour = NA) +
-  
-  labs(title = "Bud scratches",
-       x = "Time after disbudding, min", 
-       y = "Bud scratches, count per 5 min") +
-  
-  scale_y_continuous(breaks = seq(0, 2, 1), minor_breaks = NULL, limits = c(0, NA)) +
-  
-  scale_x_continuous(breaks = seq(20, 360, 40)) +
-  
-  theme(
-    plot.title = element_text(hjust = .5)
-  ) +
-  
-  ggsave("bud_scratches.png", width = 8, height = 5)
-```
-
-### Standing (betabinomial, un)
-```{r, echo = F}
-#test models
-dat$Up_prop <- dat$Up_sec/300
-dat$Up_propBaseline <- dat$Up_secBaseline/300
-
+####quadratic poisson
+```{r}
+#final model
 model <- 
   glmmTMB(
-    Up_prop ~ Up_propBaseline + Trt*poly(Minute, 3) + (1|Hutch) + (Minute - 1|ID), 
-    family = betabinomial, 
-    data = subset(dat, !is.na(Up_sec)),
+    Ear ~ scale(EarBaseline) + Treatment*Minute + Treatment*I(Minute^2) + (1|Hutch/Treatment) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson, 
+    data = dat,
     verbose = F, 
-    weights = Time,
     REML = T
   )
 
 ##check residuals
 simulationOutput <- simulateResiduals(model)
-
 plot(simulationOutput)
 
-testDispersion(simulationOutput, plot = F)
+testDispersion(simulationOutput, plot = F, alternative = "greater")
 
-testZeroInflation(simulationOutput, plot = F)
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
 
-testTemporalAutocorrelation(simulationOutput, plot = F, time = seq(20, 360, by = 20))
-```
-
-Compare models with different covariance structures:  
-```{r, echo = F}
-##compare cov structures
-model.diag <- 
-  update(
-    model,
-    Up_prop ~ Up_propBaseline + Trt*poly(Minute, 3) + (1|Hutch) + diag(as.factor(Minute) - 1|ID)
-  )
-
-model.ar1 <- 
-  update(
-    model,
-    Up_prop ~ Up_propBaseline + Trt*poly(Minute, 3) + (1|Hutch) + ar1(as.factor(Minute) - 1|ID)
-  )
-
-model.cs <- 
-  update(
-    model,
-    Up_prop ~ Up_propBaseline + Trt*poly(Minute, 3) + (1|Hutch) + cs(as.factor(Minute) - 1|ID)
-  )
-
-AICtab(model, model.diag, model.ar1, model.cs)
-
-##check residuals
-simulationOutput <- simulateResiduals(model.ar1)
-
-plot(simulationOutput)
-```
-
-Ar1 has lowest AIC but the residuals do not improve  
-
-```{r, echo = F}
 #output
 summary(model)
-
 car::Anova(model, type = 3, test.statistic = "Chisq")
 
 #lsmeans
-lsmeans <- emmeans(model, ~ Trt|Minute, type = "response", at = list(Minute = seq(20, 360, by = 20)))
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
 lsmeans
-lsmeans_df <- as.data.frame(lsmeans)
 
 #means seperation
-confint(
-  contrast(regrid(lsmeans, transform = "response"), 
-           reverse = F, 
-           ratio = F, 
-           method = "pairwise"), 
-  level = 0.95
-)
-
-multcomp::cld(lsmeans, alpha = .05)
+##multcomp::cld(lsmeans, alpha = .05)
+#confint(contrast(regrid(lsmeans, transform = "response"), method = "pairwise"))
 ```
 
 ```{r, echo = F}
@@ -1302,21 +1198,21 @@ multcomp::cld(lsmeans, alpha = .05)
 newDat <- 
   emmip(
     model, 
-    Trt ~ Minute, 
-    at = list(Minute = seq(20, 360, by = 20)), 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
     CIs = TRUE, 
     plotit = FALSE, 
     type = "response",
     level = .8
-  ) %>%
-  rename("Treatment" = "Trt") %>%
-  mutate(Treatment = ifelse(Treatment == "D", "Tincture", ifelse(Treatment == "L", "Lidocaine", ifelse(Treatment == "S", "Sham", NA))))
+  ) 
 
 #make plot
 ggplot(data = newDat, 
        aes(x = Minute, y = yvar, color = Treatment)) + 
   
-  scale_color_npg() +
+  scale_color_jama() +
+  
+  scale_fill_jama() +
   
   geom_line(size = 1) + 
   
@@ -1325,17 +1221,1203 @@ ggplot(data = newDat,
               inherit.aes = T,
               colour = NA) +
   
-  labs(title = "Standing",
+  labs(
        x = "Time after disbudding, min", 
-       y = "Standing duration, proportion of 5 min") +
+       y = "Ear flick rate, count 5-min\u207B\u00B9"
+       ) +
   
-  scale_y_continuous(breaks = seq(0, 1, .2), minor_breaks = seq(0, 1, .1), limits = c(0, 1)) +
+  scale_y_continuous(
+    breaks = seq(0, 30, 5), 
+    minor_breaks = seq(0, 30, 1), 
+    limits = c(0, NA)
+    ) +
   
-  scale_x_continuous(breaks = seq(20, 360, 40)) +
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
   
   theme(
-    plot.title = element_text(hjust = .5)
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .8)
   ) +
   
-  ggsave("standing.png", width = 8, height = 5)
+  ggsave("figure_ear_flicks.png", width = 8, height = 5)
+```
+
+### Head jerks
+```{r, include = F}
+#fit model
+model <- 
+  glmmTMB(
+    Jerk ~ scale(JerkBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson, 
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+
+
+#remove baseline
+model.nobase <-
+  update(
+    model, 
+    . ~ Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.nobase) #improves residuals
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+```
+
+####linear poisson
+```{r}
+#final model
+model <- 
+  glmmTMB(
+    Jerk ~  Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson, 
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+  
+#output
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
+lsmeans
+
+#means seperation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(contrast(regrid(lsmeans, transform = "response"), method = "pairwise"))
+```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) 
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  
+  labs(
+       x = "Time after disbudding, min", 
+       y = "Head jerk rate, count 5-min\u207B\u00B9"
+       ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, 10, 2), 
+    minor_breaks = seq(0, 10, 1), 
+    limits = c(0, NA)
+    ) +
+  
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .8)
+  ) +
+  
+  ggsave("figure_jerk.png", width = 8, height = 5)
+```
+
+### Head shakes
+```{r, include = F}
+#find best model
+model <- 
+  glmmTMB(
+    Shake ~ scale(ShakeBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID),
+    family = poisson, 
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+
+#remove baseline
+model.nobase <-
+  update(
+    model, 
+    . ~ Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.nobase) #makes residuals worse
+plot(simulationOutput)
+
+#compare additional FE
+model.q <-
+  update(
+    model, 
+    . ~ scale(ShakeBaseline) + Treatment*poly(Minute, 2) + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.q) #does not change residuals
+plot(simulationOutput)
+```
+
+####quadratic poisson
+```{r}
+#final model
+model <- 
+  glmmTMB(
+    Shake ~ scale(ShakeBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson, 
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+  
+#output
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
+lsmeans
+```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) 
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  
+  labs(
+       x = "Time after disbudding, min", 
+       y = "Head shake rate, count 5-min\u207B\u00B9"
+       ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, 2, .5), 
+    minor_breaks = seq(0, 2, .5), 
+    limits = c(0, NA)
+    ) +
+  
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .8)
+  ) +
+  
+  ggsave("figure_shake.png", width = 8, height = 5)
+```
+
+
+
+### Head rubs
+```{r, include = F}
+#find best model
+model <- 
+  glmmTMB(
+    Rub ~ scale(RubBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson, 
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+
+#fit zi
+model.zi <-
+  update(
+    model, 
+    ziformula = ~1
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.zi) #zi model improves residuals
+plot(simulationOutput)
+
+
+#remove baseline
+model.nobase <-
+  update(
+    model.zi, 
+    . ~ Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.nobase) #residuals do not change
+plot(simulationOutput)
+
+#compare additional FE
+model.q <-
+  update(
+    model.nobase, 
+    . ~ Treatment*poly(Minute, 2) + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.q) #quadratic model does not improve residual
+plot(simulationOutput)
+
+
+```
+
+####linear zi poisson 
+```{r}
+#final model
+model <- 
+  glmmTMB(
+    Rub ~ Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson,
+    ziformula = ~1,
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+#testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+  
+#output
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
+lsmeans
+```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) 
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  
+  labs(
+       x = "Time after disbudding, min", 
+       y = "Head rub rate, count 5-min\u207B\u00B9"
+       ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, 2, .25), 
+#    minor_breaks = seq(0, 2, .5), 
+    limits = c(0, NA)
+    ) +
+  
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .8)
+  ) +
+  
+  ggsave("figure_rub.png", width = 8, height = 5)
+```
+
+
+### Head movement
+```{r, include = F}
+#find best model
+model <- 
+  glmmTMB(
+    Head_movement ~ scale(Head_movementBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson, 
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+
+
+#remove baseline
+model.nobase <-
+  update(
+    model, 
+    . ~ Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.nobase) #residuals do not change
+plot(simulationOutput)
+
+#compare additional FE
+model.q <-
+  update(
+    model, 
+    . ~ scale(Head_movementBaseline) + Treatment*poly(Minute, 2) + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.q) #quadratic model does not improve residuals
+plot(simulationOutput)
+
+#add RE
+model.Re <-
+  update(
+    model, 
+    . ~ scale(Head_movementBaseline) + Treatment*Minute + (1|Hutch/Treatment) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.Re) #Re improves residuals
+plot(simulationOutput)
+
+#remove baseline
+model.nobase <-
+  update(
+    model, 
+    . ~ Treatment*Minute + (1|Hutch/Treatment) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.nobase) #residuals improve
+plot(simulationOutput)
+```
+
+####linear poisson 
+```{r}
+#final model
+model <- 
+  glmmTMB(
+    Head_movement ~ Treatment*Minute + (1|Hutch/Treatment) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson,
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+  
+#output
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
+lsmeans
+
+#means seperation
+multcomp::cld(lsmeans, alpha = .1)
+confint(contrast(regrid(lsmeans, transform = "response"), method = "pairwise"))
+```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) 
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  
+  labs(
+       x = "Time after disbudding, min", 
+       y = "Head movement rate, count 5-min\u207B\u00B9"
+       ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, 7, 1), 
+    minor_breaks = seq(0, 7, .5), 
+    limits = c(0, NA)
+    ) +
+  
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .8)
+  ) +
+  
+  ggsave("figure_head_movement.png", width = 8, height = 5)
+```
+
+
+### Scratching bud with hind hoof
+```{r, include = F}
+#fit model
+model <- 
+  glmmTMB(
+    Hoof_rub ~ scale(Hoof_rubBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson, 
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+
+
+#add zi
+model.zi <-
+  update(
+    model, 
+    ziformula = ~1
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.zi) #zi model improves residuals drastically
+plot(simulationOutput)
+
+#remove baseline
+model.nobase <-
+  update(
+    model.zi, 
+    . ~ Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.nobase) #residuals get slighly worse
+plot(simulationOutput)
+
+#compare additional FE
+model.q <-
+  update(
+    model.zi, 
+    . ~ scale(Hoof_rubBaseline) + Treatment*poly(Minute, 2) + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.q) #quadratic model improves residuals slightly (does not converge)
+plot(simulationOutput)
+```
+
+####linear zi poisson
+```{r}
+#fit model
+model <- 
+  glmmTMB(
+    Hoof_rub ~ scale(Hoof_rubBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson, 
+    ziformula = ~1,
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+#testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+  
+#output
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
+lsmeans
+
+#means seperation
+multcomp::cld(lsmeans, alpha = .1)
+
+confint(contrast(regrid(lsmeans, transform = "response"), method = "pairwise"))
+```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) 
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  
+  labs(
+       x = "Time after disbudding, min", 
+       y = "Bud scratch rate, count 5-min\u207B\u00B9"
+       ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, 1, .5), 
+    minor_breaks = seq(0, 1, .25), 
+    limits = c(0, NA)
+    ) +
+  
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .8)
+  ) +
+  
+  ggsave("figure_bud_scratches.png", width = 8, height = 5)
+```
+
+
+### Transitions
+```{r, include = F}
+#find best model
+model <- 
+  glmmTMB(
+    Transitions ~ scale(TransitionsBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson,
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+```
+
+```{r}
+#final model
+model <- 
+  glmmTMB(
+    Transitions ~ Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson,
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+  
+#output
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
+lsmeans
+
+#means seperation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(
+  contrast(regrid(lsmeans, transform = "response"), 
+           reverse = F, 
+           ratio = F, 
+           method = "pairwise"), 
+  level = 0.95
+)
+```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) 
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  
+  labs(
+       x = "Time after disbudding, min", 
+       y = "Transition rate, count 5-min\u207B\u00B9"
+       ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, .5, .25), 
+#    minor_breaks = seq(0, 1, .25), 
+    limits = c(0, NA)
+    ) +
+  
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .8)
+  ) +
+  
+  ggsave("figure_transitions.png", width = 8, height = 5)
+```
+
+### Transitioning up
+```{r, include = F}
+#find best model
+model <- 
+  glmmTMB(
+    Up ~ scale(UpBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson,
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater") 
+```
+
+```{r}
+#final model
+model <- 
+  glmmTMB(
+    Up ~ scale(UpBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = poisson,
+    data = dat,
+    verbose = F, 
+    REML = T
+  )
+
+#check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+  
+#output
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
+lsmeans
+
+#means seperation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(
+  contrast(regrid(lsmeans, transform = "response"), 
+           reverse = F, 
+           ratio = F, 
+           method = "pairwise"), 
+  level = 0.95
+)
+```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) 
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  
+  labs(
+       x = "Time after disbudding, min", 
+       y = "Transitioning up rate, count 5-min\u207B\u00B9"
+       ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, .5, .25), 
+#    minor_breaks = seq(0, 1, .25), 
+    limits = c(0, NA)
+    ) +
+  
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .8)
+  ) +
+  
+  ggsave("figure_transition_up.png", width = 8, height = 5)
+```
+
+
+
+### Standing (Quadratic betabinomial, baseline, poly random slope)
+```{r, echo = F}
+#fit model
+model <- 
+  glmmTMB(
+    cbind(Up_sec, Down_sec) ~ scale(Up_secBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + cs(as.factor(Minute)-1|ID), 
+    family = betabinomial, 
+    data = dat,
+    verbose = F,
+    REML = T
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testZeroInflation(simulationOutput, plot = F)
+
+
+#remove baseline
+model.nobase <-
+  update(
+    model, 
+    .~ Treatment*Minute + (1|Hutch) + (1|ID) + cs(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.nobase) ##residuals improve
+plot(simulationOutput)
+
+
+#unstructured cov strucs
+model.ar1 <-
+  update(
+    model, 
+    .~ Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.ar1) ##residuals get a lot worse
+plot(simulationOutput)
+
+
+#add quadratic
+model.q <-
+  update(
+    model, 
+    . ~ Treatment*poly(Minute, 2) + (1|Hutch) + (1|ID) + cs(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.q) #no major improvement
+plot(simulationOutput)
+
+testZeroInflation(simulationOutput, plot = F)
+```
+
+```{r}
+#final model
+model <- 
+  glmmTMB(
+    cbind(Up_sec, Down_sec) ~ Treatment*Minute + (1|Hutch) + (1|ID) + cs(as.factor(Minute)-1|ID), 
+    family = betabinomial, 
+    data = dat,
+    verbose = F,
+    REML = T
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testZeroInflation(simulationOutput, plot = F)
+
+#output
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment|Minute, type = "response", at = list(Minute = seq(20, 340, 20)))
+lsmeans
+
+confint(contrast(lsmeans, method = "pairwise"))
+
+#means seperation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(contrast(regrid(lsmeans), method = "pairwise"))
+
+```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) 
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  
+  labs(
+       x = "Time after disbudding, min", 
+       y = "Standing time, proportion of 5-min"
+       ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, .7, .1), 
+#    minor_breaks = seq(0, 25, 1), 
+    limits = c(0, NA)
+    ) +
+  
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .13)
+  ) + 
+  
+  ggsave("figure_standing.png", width = 8, height = 5)
+```
+
+### Ruminating (Quadratic betabinomial, baseline, no random slope)
+```{r, echo = F}
+#fit model
+model <- 
+  glmmTMB(
+    cbind(Rum_sec, 300 - Rum_sec) ~ scale(Rum_secBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = betabinomial, 
+    data = dat,
+    verbose = F,
+    REML = T
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testZeroInflation(simulationOutput, plot = F)
+
+
+#cs cov strucs
+model.cs <-
+  update(
+    model, 
+    .~ scale(Rum_secBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + cs(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.cs) ##residuals get a lot worse
+plot(simulationOutput)
+
+
+#add RE
+model.RE <-
+  update(
+    model, 
+    . ~ scale(Rum_secBaseline) + Treatment*Minute + (1|Hutch/Treatment) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.RE) #converges
+plot(simulationOutput)
+
+testZeroInflation(simulationOutput, plot = F)
+
+#remove baseline
+model.nobase <-
+  update(
+    model.RE, 
+    .~ Treatment*Minute + (1|Hutch/Treatment) + (1|ID) + ar1(as.factor(Minute)-1|ID)
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model.nobase) ##residuals get worse
+plot(simulationOutput)
+
+```
+
+```{r}
+#final model
+model <- 
+  glmmTMB(
+    cbind(Rum_sec, 300 - Rum_sec) ~  Treatment*Minute + (1|ID) + ar1(as.factor(Minute)-1|ID), 
+    family = betabinomial, 
+    data = dat,
+    verbose = F,
+    REML = T
+  )
+
+##check residuals
+simulationOutput <- simulateResiduals(model)
+plot(simulationOutput)
+
+testZeroInflation(simulationOutput, plot = F)
+
+#output
+summary(model)
+car::Anova(model, type = 3, test.statistic = "Chisq")
+
+
+#lsmeans
+lsmeans <- emmeans(model, ~ Treatment, type = "response")
+lsmeans
+
+confint(contrast(lsmeans, method = "pairwise"))
+
+#means seperation
+multcomp::cld(lsmeans, alpha = .1)
+
+confint(contrast(regrid(lsmeans), 
+           reverse = F, 
+           ratio = T, 
+           method = "pairwise"), 
+  level = 0.95
+)
+
+```
+
+```{r, echo = F}
+#predict Y
+newDat <- 
+  emmip(
+    model, 
+    Treatment ~ Minute, 
+    at = list(Minute = seq(20, 340, by = 20)), 
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) 
+
+#make plot
+ggplot(data = newDat, 
+       aes(x = Minute, y = yvar, color = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  
+  labs(
+       x = "Time after disbudding, min", 
+       y = "Rumination time, proportion of 5-min"
+       ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, .5, .1), 
+#    minor_breaks = seq(0, 25, 1), 
+    limits = c(0, NA)
+    ) +
+  
+  scale_x_continuous(breaks = seq(20, 340, 40)) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.2, .8)
+  ) 
++
+  
+  ggsave("figure_rumination.png", width = 8, height = 5)
 ```
