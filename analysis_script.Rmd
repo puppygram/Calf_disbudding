@@ -58,7 +58,7 @@ dat <- dat %>%
   group_by(ID) %>% 
   mutate(Baseline = Cortisol[Minute == "-10"]) %>%
   filter(Minute != "-10")
-  
+
 ```
 
 ## Histograms
@@ -192,7 +192,7 @@ newDat.b <-
     type = "response",
     level = .8
   ) %>%
-   mutate(Minute.n = -10)
+  mutate(Minute.n = -10)
 ```
 
 ```{r, echo = F}
@@ -302,7 +302,7 @@ zeros <-
     Force = sum(count_row_if(0, dat$Force))/countFunction(dat$Force), 
     Rear = sum(count_row_if(0, dat$Rear))/countFunction(dat$Rear)
   )
-  
+
 
 zeros
 ```
@@ -811,10 +811,10 @@ AICtab(model.ML, model2, model3, model4) #model without added FE is best
 
 #compare models with added RE
 #model5 <-
-  #update(
-    #model, 
-   # . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + (1|Breed)
- # )
+#update(
+#model, 
+# . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + (1|Breed)
+# )
 
 #AICtab(model, model5) #model without added RE is best
 
@@ -881,7 +881,7 @@ model5 <-
   update(
     model, 
     . ~ Treatment + (1|Hutch) + offset(log(Handle_time_impute)) + (1|Breed)
- )
+  )
 
 AICtab(model, model5) #model without added RE is best
 
@@ -897,7 +897,7 @@ lsmeans
 ### Kick 
 ```{r}
 dat$KickRate <-(dat$Kick/dat$Handle_time_impute)*10
-  
+
 describeBy(dat$KickRate, group = dat$Treatment)
 ```
 
@@ -966,7 +966,7 @@ baseline_dat <- dat %>%
   rename_if(is.numeric, list(~paste0(., "Baseline"))) %>%
   rename("Age" = "AgeBaseline") %>%
   rename("Order" = "OrderBaseline")
-  
+
 
 #impute mean baseline value for missing observations
 mean_baseline <- as.data.frame(t(colMeans(filter(dat, Minute < 0)[8:21], na.rm = T)))
@@ -1103,7 +1103,7 @@ Steps:
 * If overdispersion or zi is present, then compare nb and zi models  
 * Fit ML model to compare removal of baseline term and polynomial terms  
 * Add hutch*treatment interaction as RE if it improves residuals
-    
+
 
 ### Ear flicks
 ```{r, include = F}
@@ -1222,15 +1222,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Ear flick rate, count 5-min\u207B\u00B9"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Ear flick rate, count 5-min\u207B\u00B9"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, 30, 5), 
     minor_breaks = seq(0, 30, 1), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
@@ -1298,7 +1298,7 @@ plot(simulationOutput)
 testDispersion(simulationOutput, plot = F, alternative = "greater")
 
 testZeroInflation(simulationOutput, plot = F, alternative = "greater")
-  
+
 #output
 summary(model)
 car::Anova(model, type = 3, test.statistic = "Chisq")
@@ -1342,15 +1342,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Head jerk rate, count 5-min\u207B\u00B9"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Head jerk rate, count 5-min\u207B\u00B9"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, 10, 2), 
     minor_breaks = seq(0, 10, 1), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
@@ -1424,7 +1424,7 @@ plot(simulationOutput)
 testDispersion(simulationOutput, plot = F, alternative = "greater")
 
 testZeroInflation(simulationOutput, plot = F, alternative = "greater")
-  
+
 #output
 summary(model)
 car::Anova(model, type = 3, test.statistic = "Chisq")
@@ -1463,15 +1463,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Head shake rate, count 5-min\u207B\u00B9"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Head shake rate, count 5-min\u207B\u00B9"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, 2, .5), 
     minor_breaks = seq(0, 2, .5), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
@@ -1562,7 +1562,7 @@ plot(simulationOutput)
 testDispersion(simulationOutput, plot = F, alternative = "greater")
 
 #testZeroInflation(simulationOutput, plot = F, alternative = "greater")
-  
+
 #output
 summary(model)
 car::Anova(model, type = 3, test.statistic = "Chisq")
@@ -1601,15 +1601,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Head rub rate, count 5-min\u207B\u00B9"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Head rub rate, count 5-min\u207B\u00B9"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, 2, .25), 
-#    minor_breaks = seq(0, 2, .5), 
+    #    minor_breaks = seq(0, 2, .5), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
@@ -1707,7 +1707,7 @@ plot(simulationOutput)
 testDispersion(simulationOutput, plot = F, alternative = "greater")
 
 testZeroInflation(simulationOutput, plot = F, alternative = "greater")
-  
+
 #output
 summary(model)
 car::Anova(model, type = 3, test.statistic = "Chisq")
@@ -1750,15 +1750,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Head movement rate, count 5-min\u207B\u00B9"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Head movement rate, count 5-min\u207B\u00B9"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, 7, 1), 
     minor_breaks = seq(0, 7, .5), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
@@ -1846,7 +1846,7 @@ plot(simulationOutput)
 testDispersion(simulationOutput, plot = F, alternative = "greater")
 
 #testZeroInflation(simulationOutput, plot = F, alternative = "greater")
-  
+
 #output
 summary(model)
 car::Anova(model, type = 3, test.statistic = "Chisq")
@@ -1891,15 +1891,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Bud scratch rate, count 5-min\u207B\u00B9"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Bud scratch rate, count 5-min\u207B\u00B9"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, 1, .5), 
     minor_breaks = seq(0, 1, .25), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
@@ -1951,7 +1951,7 @@ plot(simulationOutput)
 testDispersion(simulationOutput, plot = F, alternative = "greater")
 
 testZeroInflation(simulationOutput, plot = F, alternative = "greater")
-  
+
 #output
 summary(model)
 car::Anova(model, type = 3, test.statistic = "Chisq")
@@ -2002,15 +2002,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Transition rate, count 5-min\u207B\u00B9"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Transition rate, count 5-min\u207B\u00B9"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, .5, .25), 
-#    minor_breaks = seq(0, 1, .25), 
+    #    minor_breaks = seq(0, 1, .25), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
@@ -2061,7 +2061,7 @@ plot(simulationOutput)
 testDispersion(simulationOutput, plot = F, alternative = "greater")
 
 testZeroInflation(simulationOutput, plot = F, alternative = "greater")
-  
+
 #output
 summary(model)
 car::Anova(model, type = 3, test.statistic = "Chisq")
@@ -2112,15 +2112,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Transitioning up rate, count 5-min\u207B\u00B9"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Transitioning up rate, count 5-min\u207B\u00B9"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, .5, .25), 
-#    minor_breaks = seq(0, 1, .25), 
+    #    minor_breaks = seq(0, 1, .25), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
@@ -2255,15 +2255,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Standing time, proportion of 5-min"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Standing time, proportion of 5-min"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, .7, .1), 
-#    minor_breaks = seq(0, 25, 1), 
+    #    minor_breaks = seq(0, 25, 1), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
@@ -2364,10 +2364,10 @@ confint(contrast(lsmeans, method = "pairwise"))
 multcomp::cld(lsmeans, alpha = .1)
 
 confint(contrast(regrid(lsmeans), 
-           reverse = F, 
-           ratio = T, 
-           method = "pairwise"), 
-  level = 0.95
+                 reverse = F, 
+                 ratio = T, 
+                 method = "pairwise"), 
+        level = 0.95
 )
 
 ```
@@ -2401,15 +2401,15 @@ ggplot(data = newDat,
               colour = NA) +
   
   labs(
-       x = "Time after disbudding, min", 
-       y = "Rumination time, proportion of 5-min"
-       ) +
+    x = "Time after disbudding, min", 
+    y = "Rumination time, proportion of 5-min"
+  ) +
   
   scale_y_continuous(
     breaks = seq(0, .5, .1), 
-#    minor_breaks = seq(0, 25, 1), 
+    #    minor_breaks = seq(0, 25, 1), 
     limits = c(0, NA)
-    ) +
+  ) +
   
   scale_x_continuous(breaks = seq(20, 340, 40)) +
   
