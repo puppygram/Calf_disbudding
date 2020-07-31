@@ -1,0 +1,2061 @@
+---
+title: "Multiple imputation"
+author: "Hannah Phillips"
+date: "6/22/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F)
+```
+
+```{r setup, include = F}
+knitr::opts_chunk$set(echo = T, messages = F, warning = F)
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(nlme) #lme model
+library(lme4) #lmer
+library(lmerTest) # KR ddf
+library(afex) #CIs
+library(emmeans) #lsmeans
+library(glmmTMB) #glmm
+library(ggplot2)
+library(ggsci) #plot colors (scale_color_npg())
+library(cowplot)
+library(psych) #describe
+library(expss) #count_row
+library(bbmle) # AICtab
+library(DHARMa) #test dispersion https://cran.r-project.org/web/packages/DHARMa/vignettes/DHARMa.html
+library(mice) #MI
+library(countimp) #MI for count data
+library(papeR)
+library(extrafont)
+#font_import()
+#loadfonts(device="win") #Register fonts for Windows bitmap output
+#fonts()
+
+
+
+theme_set(
+  theme_bw() +
+    theme(
+      plot.title = element_text(hjust = .5),
+      legend.key.width = unit(1.5, "cm"),
+      axis.text = element_text(size = 14),
+      axis.title = element_text(size = 16),
+      legend.text = element_text(size = 14),
+      legend.title = element_text(size = 16),
+      text = element_text(family = "Times New Roman")
+    )
+)
+```
+
+# input data
+```{r, include = F}
+#behavior at disbudding
+disbud.dat <-
+  read_excel("disbudding_behavior_data.xlsx") %>%
+  mutate_at(c("ID", "Treatment", "Hutch", "Breed"), as.factor) %>%
+  mutate(Head_movement = Head_avoidance + Head_stretch) %>%
+  mutate(
+    Treatment = ifelse(Treatment == "D", "T-CD-T", 
+                       ifelse(Treatment == "L", "LA-CD", 
+                              ifelse(Treatment == "S", "SD", NA)))
+    
+  ) %>%
+  mutate(Treatment = as.factor(Treatment)) %>%
+  dplyr::select(-c(Time))
+
+#cortisol data
+cortisol.dat <- 
+  read_excel("C:/Users/Hannah/Desktop/Disbudding project/disbudding_R_project/cortisol_data.xlsx", sheet = "Data") %>%
+  mutate_at(c("ID", "Treatment", "Hutch", "Breed", "Minute"), as.factor) %>%
+  mutate(
+    Treatment = ifelse(Treatment == "D", "T-CD-T", 
+                       ifelse(Treatment == "L", "LA-CD", 
+                              ifelse(Treatment == "S", "SD", NA)))
+  ) %>%
+  mutate(Treatment = as.factor(Treatment)) %>%
+  dplyr::select(-c(DOB, Date)) %>%
+  mutate(Treatment.L = ifelse(Treatment == "LA-CD", 1, 0)) %>%
+  mutate(Treatment.T = ifelse(Treatment == "T-CD-T", 1, 0)) %>%
+  mutate(Treatment.S = ifelse(Treatment == "SD", 1, 0)) %>%
+  mutate(Minute.1 = ifelse(Minute == "1", 1, 0)) %>%
+  mutate(Minute.10 = ifelse(Minute == "10", 1, 0)) %>%
+  mutate(Minute.30 = ifelse(Minute == "30", 1, 0)) %>%
+  mutate(Minute.90 = ifelse(Minute == "90", 1, 0)) %>%
+  mutate(Minute.210 = ifelse(Minute == "210", 1, 0)) %>%
+  mutate(Minute.450 = ifelse(Minute == "450", 1, 0))
+
+
+
+cortisol.dat <- 
+  left_join(cortisol.dat, disbud.dat %>% dplyr::select(c(ID, Hutch, Order)), by = c("ID", "Hutch")) %>%
+  mutate(Order = ifelse(is.na(Order.y), Order.x, Order.y)) %>%
+  dplyr::select(-c(Order.y, Order.x))
+
+#post disbudding cortisol data
+cortisol.dat.post <- 
+  cortisol.dat %>%
+  group_by(ID) %>% 
+  mutate(Baseline = Cortisol[Minute == "-10"]) %>%
+  filter(Minute != "-10") %>%
+  dplyr::select(c(ID, Order, Treatment, Hutch, Breed, Age, Minute, Cortisol, Baseline, Treatment.L:Minute.450))
+
+#baseline cortisol data
+cortisol.dat.baseline <-   
+  cortisol.dat %>%
+  filter(Minute == "-10") %>%
+  dplyr::select(-Minute) %>%
+  dplyr::select(c(ID, Order, Treatment, Hutch, Breed, Age, Cortisol))
+
+
+
+#post behavior data
+behavior.dat <- 
+  read_excel("post_behavior_data.xlsx") %>%
+  mutate_at(c("ID", "Breed", "Trt", "Hutch"), as.factor) %>%
+  mutate(Interval = as.numeric(Interval)) %>%
+  rename(Minute = Interval) %>%
+  rename(Treatment = Trt) %>%
+  mutate(Oral = Groom + Water + Straw + Oral) %>%
+  mutate(Transitions = Up + Down) %>%
+  dplyr::select(-c(Date, Dehorn_time, Hour, Tail, Groom, Water, Straw)) %>%
+  mutate(
+    Treatment = ifelse(Treatment == "D", "T-CD-T", 
+                       ifelse(Treatment == "L", "LA-CD", 
+                              ifelse(Treatment == "S", "SD", NA)))
+  ) %>%
+  mutate(Treatment = as.factor(Treatment)) %>%
+  mutate(Treatment.L = ifelse(Treatment == "LA-CD", 1, 0)) %>%
+  mutate(Treatment.T = ifelse(Treatment == "T-CD-T", 1, 0)) %>%
+  mutate(Treatment.S = ifelse(Treatment == "SD", 1, 0)) %>%
+  mutate(Hour = ifelse(Minute >= 20 & Minute <= 60, 1,
+                       ifelse(Minute >= 80 & Minute <= 120, 2, 
+                              ifelse(Minute >= 140 & Minute <= 180, 3, 
+                                     ifelse(Minute >= 200 & Minute <= 240, 4, 
+                                            ifelse(Minute >= 260 & Minute <= 300, 5, 
+                                                   ifelse(Minute >= 320 & Minute <= 360, 6, 0))))))) %>%
+  mutate(Minute.20 = ifelse(Minute == 20, 1, 0)) %>%
+  mutate(Minute.40 = ifelse(Minute == 40, 1, 0)) %>%
+  mutate(Minute.60 = ifelse(Minute == 60, 1, 0)) %>%
+  mutate(Minute.80 = ifelse(Minute == 80, 1, 0)) %>%
+  mutate(Minute.100 = ifelse(Minute == 100, 1, 0)) %>%
+  mutate(Minute.120 = ifelse(Minute == 120, 1, 0)) %>%
+  mutate(Minute.140 = ifelse(Minute == 140, 1, 0)) %>%
+  mutate(Minute.160 = ifelse(Minute == 160, 1, 0)) %>%
+  mutate(Minute.180 = ifelse(Minute == 180, 1, 0)) %>%
+  mutate(Minute.200 = ifelse(Minute == 200, 1, 0)) %>%
+  mutate(Minute.220 = ifelse(Minute == 220, 1, 0)) %>%
+  mutate(Minute.240 = ifelse(Minute == 240, 1, 0)) %>%
+  mutate(Minute.260 = ifelse(Minute == 260, 1, 0)) %>%
+  mutate(Minute.280 = ifelse(Minute == 280, 1, 0)) %>%
+  mutate(Minute.300 = ifelse(Minute == 300, 1, 0)) %>%
+  mutate(Minute.320 = ifelse(Minute == 320, 1, 0)) %>%
+  mutate(Minute.340 = ifelse(Minute == 340, 1, 0)) %>%
+  mutate(Minute.360 = ifelse(Minute == 360, 1, 0)) 
+
+
+
+#create baseline
+behavior.dat.baseline <- 
+  behavior.dat %>%
+  filter(Minute < 0) %>%
+  group_by(ID, Breed, Age, Treatment, Hutch, Order) %>%
+  summarise_all(funs(mean(.))) %>%
+  dplyr::select(-Minute) %>%
+  rename_if(is.numeric, list(~paste0(., "Baseline"))) %>%
+  rename("Age" = "AgeBaseline") %>%
+  rename("Order" = "OrderBaseline") %>%
+  dplyr::select(-c(Treatment.LBaseline:Minute.360Baseline))
+
+is.nan.data.frame <- function(x)
+  do.call(cbind, lapply(x, is.nan)) #convert NaN to NA
+
+behavior.dat.baseline[is.nan(behavior.dat.baseline)] <- NA
+
+#merge pre and post data
+behavior.dat.post <- 
+  left_join(
+    behavior.dat, 
+    behavior.dat.baseline %>% 
+      dplyr::select(c(ID:TransitionsBaseline)), 
+    by = c("ID", "Breed", "Age", "Treatment", "Hutch", "Order")) %>%
+  filter(Minute > 0) %>%
+  mutate(Minute = as.factor(Minute)) %>%
+  mutate(Hour = as.factor(Hour))
+
+#make rank ordinal
+behavior.dat.post$Rank <- ordered(behavior.dat.post$Rank, levels = 1:4, labels = c("comfortable", "slightly uncomfortable", "uncomfortable", "very uncomfortable"))
+```
+
+# Cortisol
+```{r}
+#percent of missing obs
+nrow(filter(cortisol.dat, is.na(Cortisol))) / nrow(cortisol.dat) 
+
+#create interactions
+{
+  cortisol.dat.post <- 
+    cortisol.dat.post %>%
+    mutate(Treatment.L.Minute.1 = Treatment.L*Minute.1) %>%
+    mutate(Treatment.T.Minute.1 = Treatment.T*Minute.1) %>%
+    mutate(Treatment.S.Minute.1 = Treatment.S*Minute.1) %>%
+    mutate(Treatment.L.Minute.10 = Treatment.L*Minute.10) %>%
+    mutate(Treatment.T.Minute.10 = Treatment.T*Minute.10) %>%
+    mutate(Treatment.S.Minute.10 = Treatment.S*Minute.10) %>%
+    mutate(Treatment.L.Minute.30 = Treatment.L*Minute.30) %>%
+    mutate(Treatment.T.Minute.30 = Treatment.T*Minute.30) %>%
+    mutate(Treatment.S.Minute.30 = Treatment.S*Minute.30) %>%
+    mutate(Treatment.L.Minute.90 = Treatment.L*Minute.90) %>%
+    mutate(Treatment.T.Minute.90 = Treatment.T*Minute.90) %>%
+    mutate(Treatment.S.Minute.90 = Treatment.S*Minute.90) %>%
+    mutate(Treatment.L.Minute.210 = Treatment.L*Minute.210) %>%
+    mutate(Treatment.T.Minute.210 = Treatment.T*Minute.210) %>%
+    mutate(Treatment.S.Minute.210 = Treatment.S*Minute.210) %>%
+    mutate(Treatment.L.Minute.450 = Treatment.L*Minute.450) %>%
+    mutate(Treatment.T.Minute.450 = Treatment.T*Minute.450) %>%
+    mutate(Treatment.S.Minute.450 = Treatment.S*Minute.450)
+}  
+
+
+meth <- mice(cortisol.dat.post, max = 0, print = FALSE, seed = 1)$meth
+meth[c("Baseline", "Cortisol")] = "rf"
+
+predM <- mice(cortisol.dat.post, max = 0, print = FALSE, seed = 1)$pred
+{
+  predM[c("Baseline"),] = 0
+  predM[, c("Treatment.L", "Treatment.T", "Treatment.S", "Minute.1", "Minute.10", "Minute.30", "Minute.90", "Minute.210", "Minute.450")] = 0
+  predM[, c("ID")] = -2 #subject effect
+  predM[c("Baseline"), c("Order", "Hutch", "Breed", "Age", "Cortisol")] = 1 
+  predM[, c("Age")] = 0 
+}
+
+#set ID as integer
+cortisol.dat.post$ID <- as.integer(cortisol.dat.post$ID)
+
+#impute missing data
+imp <- 
+  mice(cortisol.dat.post, 
+       maxit = 5, 
+       m = 50,
+       predictorMatrix = predM, 
+       method = meth, 
+       print =  FALSE,
+       seed = 1)
+
+imp.dat.long <- mice::complete(imp, action = "long", include = T) 
+
+
+# Convert back to mids type - mice can work with this type
+cortisol.dat.post.imp <- as.mids(imp.dat.long)
+
+model.cortisol.post <- 
+  with(
+    cortisol.dat.post.imp,
+    lme(
+      log(Cortisol + 1) ~ scale(Baseline) + Treatment*Minute, 
+      random = ~1|Hutch/ID, 
+      correlation = corAR1(),
+      weights = varIdent(form = ~ 1 | Minute),
+      method = "ML",
+      control = lmeControl(maxIter = 1e8, msMaxIter = 1e8)
+    )
+  )
+
+#pooled output
+est <- pool(model.cortisol.post)
+est
+
+#pooled F-tests
+analysis <- 1:50
+
+
+Fvalues.baseline <- lapply(analysis, function(x) {
+  Anova(model.cortisol.post$ana[[x]])[2,3]})
+Fvalues.baseline <- as.data.frame(Fvalues.baseline)
+miceadds::micombine.F(Fvalues.baseline, 1)
+
+
+Fvalues.treatment <- lapply(analysis, function(x) {
+  Anova(model.cortisol.post$ana[[x]])[3,3]})
+Fvalues.treatment <- as.data.frame(Fvalues.treatment)
+miceadds::micombine.F(Fvalues.treatment, 2)
+
+
+Fvalues.time <- lapply(analysis, function(x) {
+  Anova(model.cortisol.post$ana[[x]])[4,3]})
+Fvalues.time <- as.data.frame(Fvalues.time)
+miceadds::micombine.F(Fvalues.time, 5)
+
+
+Fvalues.interaction <- lapply(analysis, function(x) {
+  Anova(model.cortisol.post$ana[[x]])[5,3]})
+Fvalues.interaction <- as.data.frame(Fvalues.interaction)
+miceadds::micombine.F(Fvalues.interaction, 10)
+
+
+##lsmeans
+lsmeans <- emmeans(model.cortisol.post, ~ Treatment | Minute, type = "response")
+
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(contrast(regrid(lsmeans, transform = "response"), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.cortisol.post, ~ Treatment | Minute, type = "response"), ratio = F, method = "pairwise")
+
+####cortisol before disbudding####
+
+imp.dat.long2 <- imp.dat.long %>%
+  filter(Minute == "1")
+
+# Convert back to mids type - mice can work with this type
+cortisol.dat.baseline.imp <- as.mids(imp.dat.long2)
+
+model.cortisol.baseline <- 
+  with(
+    cortisol.dat.baseline.imp,
+    lme(
+      log(Baseline + 1) ~ Treatment, 
+      random = ~1|Hutch,
+      method = "ML"
+    )
+  )
+
+#pooled type II F-tests
+Fvalues.treatment <- lapply(analysis, function(x) {
+  Anova(model.cortisol.baseline$ana[[x]])[2,3]
+})
+
+
+
+Fvalues.treatment <- as.data.frame(Fvalues.treatment)
+miceadds::micombine.F(Fvalues.treatment, 2)
+
+#predict Y
+predict.cortisol.post <- 
+  emmip(
+    model.cortisol.post, 
+    Treatment ~ Minute,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  )
+
+predict.cortisol.baseline <- 
+  emmip(
+    model.cortisol.baseline, 
+    ~ Treatment,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) %>%
+  mutate(Minute = "-10")
+
+#merge with baseline means
+predict.cortisol <- rbind(predict.cortisol.post, predict.cortisol.baseline)
+predict.cortisol$Minute <- as.numeric(levels(predict.cortisol$Minute))[predict.cortisol$Minute]
+
+#make plot
+{
+ggplot(data = predict.cortisol, 
+       aes(x = Minute, y = yvar, color = Treatment, linetype = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+    
+    geom_point() +
+  
+  geom_errorbar(aes(ymin = LCL, ymax = UCL), alpha = .5, linetype = "solid") +
+  
+  labs(x = "Time after disbudding, min", 
+       y = "Serum cortisol concentration, ng mL\u207B\u00B9") +
+  
+  scale_y_continuous(breaks = seq(0, 40, 10), minor_breaks = seq(0, 40, 5), limits = c(0, NA), expand = c(0, 0.1)) +
+  
+  scale_x_continuous(breaks = c(-10, 1, 10, 30, 90, 210, 450), minor_breaks = NULL, expand = c(0,0)) +
+  
+  geom_text(label = "a", x = 13, y = 25.2, color = "gray40", family = "Times New Roman", size = 5, hjust = 0) + 
+  geom_text(label = "ab", x = 13, y = 20.8, color = "gray40", family = "Times New Roman", size = 5, hjust = 0) +
+  geom_text(label = "b", x = 13, y = 17.2, color = "gray40", family = "Times New Roman", size = 5, hjust = 0) +
+  
+  geom_text(label = "a", x = 33, y = 28.3, color = "gray40", family = "Times New Roman", size = 5, hjust = 0) +
+  geom_text(label = "b", x = 33, y = 15, color = "gray40", family = "Times New Roman", size = 5, hjust = 0) +
+  geom_text(label = "c", x = 33, y = 9.2, color = "gray40", family = "Times New Roman", size = 5, hjust = 0) +
+  
+  geom_text(label = "a", x = 94, y = 8.6, color = "gray40", family = "Times New Roman", size = 5, hjust = 0) + 
+  geom_text(label = "ab", x = 94, y = 6.5, color = "gray40", family = "Times New Roman", size = 5, hjust = 0) +
+  geom_text(label = "b", x = 94, y = 4.2, color = "gray40", family = "Times New Roman", size = 5, hjust = 0) +
+  
+  theme(
+    legend.position = c(.8, .8),
+    legend.background = element_rect(NA)
+  ) +
+  
+  ggsave("figure_cortisol.png", width = 9.5, height = 5)
+}
+```
+
+# Behavior at disbudding
+```{r}
+#percent of missing obs
+{
+  nrow(filter(disbud.dat, is.na(Burn_time)))/ nrow(disbud.dat) 
+  nrow(filter(disbud.dat, is.na(Handle_time)))/ nrow(disbud.dat) 
+  (nrow(filter(disbud.dat, is.na(Tail_wag))) + nrow(filter(disbud.dat, is.na(Handle_time))))/ (nrow(disbud.dat) + nrow(disbud.dat))
+  (nrow(filter(disbud.dat, is.na(Head_movement))) + nrow(filter(disbud.dat, is.na(Handle_time))))/ (nrow(disbud.dat) + nrow(disbud.dat))
+  (nrow(filter(disbud.dat, is.na(Force))) + nrow(filter(disbud.dat, is.na(Handle_time))))/ (nrow(disbud.dat) + nrow(disbud.dat))
+  (nrow(filter(disbud.dat, is.na(Rear))) + nrow(filter(disbud.dat, is.na(Handle_time))))/ (nrow(disbud.dat) + nrow(disbud.dat))
+}
+
+##change predictor matrix
+predM = mice(disbud.dat, seed = 1, maxit = 0)$predictorMatrix
+{
+  predM[, c("Right_sec", "Left_sec", "Burn_time", "Vocal", "Kick", "Fall", "Tail_wag", "Head_avoidance", "Head_stretch", "Force", "Rear", "Head_movement" )] = 0
+  predM[, "ID"] = -2
+  predM[,"Age"] = 0
+}
+
+##check method
+meth = mice(disbud.dat, seed = 1, maxit = 0)$method
+{
+  meth[c("Right_sec", "Left_sec", "Burn_time", "Handle_time")] = "rf"
+  meth[c("Tail_wag", "Head_avoidance", "Head_stretch", "Head_movement", "Force", "Kick")] = "poisson"
+  meth[c("Vocal", "Fall",  "Rear")] = "rf"
+}
+
+#set ID as integer
+disbud.dat$ID <- as.integer(disbud.dat$ID)
+
+#impute missing data
+imp <- 
+  countimp(disbud.dat, 
+           maxit = 5,
+           m = 50,
+           predictorMatrix = predM, 
+           method = meth, 
+           print =  FALSE,
+           seed = 1)
+imp.dat.long <- mice::complete(imp, action = "long", include = T)
+
+disbud.dat.imp <- as.mids(imp.dat.long)
+```
+
+# Burn time
+```{r}
+model.burnTime <- 
+  with(
+    disbud.dat.imp,
+    lme(
+      (Right_sec + Left_sec) ~ Treatment, 
+      random = ~1|Hutch,
+      method = "ML"
+    )
+  )
+
+#pooled output
+est <- pool(model.burnTime)
+est
+
+#pooled F-tests
+analysis <- 1:50
+
+miceadds::micombine.F(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.burnTime$ana[[x]])[2,3]})), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.burnTime, ~ Treatment)
+lsmeans
+
+lsmeans2 <- emmeans(model.burnTime, ~ 1)
+lsmeans2
+
+#means separation
+multcomp::cld(lsmeans, alpha = .08)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+contrast(emmeans(model.burnTime, ~ Treatment), ratio = F, method = "pairwise")
+```
+
+# Handle time
+```{r}
+model.handleTime <- 
+  with(
+    disbud.dat.imp,
+    lme(
+      Handle_time ~ Treatment, 
+      random = ~1|Hutch,
+      method = "ML"
+    )
+  )
+
+#pooled output
+est <- pool(model.handleTime)
+est
+
+#pooled F-tests
+miceadds::micombine.F(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.handleTime$ana[[x]])[2, 3]})), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.handleTime, ~ Treatment)
+lsmeans
+
+lsmeans2 <- emmeans(model.handleTime, ~ 1)
+lsmeans2
+```
+
+# Tail wags (zinb2)
+```{r}
+model.tail <- 
+  with(
+    disbud.dat.imp,
+    glmmTMB(
+      Tail_wag ~ Treatment + (1|Hutch) + offset(log(Handle_time)), 
+      family = nbinom2,
+      ziformula = ~1,
+      verbose = F, 
+      REML = F
+    )
+  )
+
+
+simulationOutput <- simulateResiduals(model.tail$ana[[1]])
+testZeroInflation(simulationOutput, alternative = "greater")
+testDispersion(simulationOutput, alternative = "greater")
+
+
+#pooled chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.tail$ana[[x]], test.statistic = "Chisq")[1,1]})), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.tail, ~ Treatment, type = "response", offset = log(10))
+lsmeans
+```
+
+# Head movement (p)
+```{r}
+model.head <- 
+  with(
+    disbud.dat.imp,
+    glmmTMB(
+      (Head_avoidance + Head_stretch) ~ Treatment + (1|Hutch) + offset(log(Handle_time)), 
+      family = poisson,
+      verbose = F, 
+      REML = F
+    )
+  )
+
+
+simulationOutput <- simulateResiduals(model.head$ana[[15]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled F-tests
+chiSqvalues.treatment <- lapply(analysis, function(x) {
+  Anova(model.head$ana[[x]], test.statistic = "Chisq")[1,1]})
+miceadds::micombine.chisquare(as.data.frame(chiSqvalues.treatment), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.head, ~ Treatment, type = "response", offset = log(10))
+lsmeans
+```
+
+# Force (p)
+```{r}
+model.force <- 
+  with(
+    disbud.dat.imp,
+    glmmTMB(
+      Force ~ Treatment + (1|Hutch) + offset(log(Handle_time)), 
+      family = poisson, 
+      verbose = F, 
+      REML = F
+    )
+  )
+
+simulationOutput <- simulateResiduals(model.force$ana[[25]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, alternative = "greater")
+
+#pooled F-tests
+chiSqvalues.treatment <- lapply(analysis, function(x) {
+  car::Anova(model.force$ana[[x]], test.statistic = "Chisq")[1,1]})
+Fvalues.treatment <- as.data.frame(chiSqvalues.treatment)
+miceadds::micombine.chisquare(chiSqvalues.treatment, 2)
+
+##lsmeans
+lsmeans <- emmeans(model.force, ~ Treatment, type = "response", offset = log(10))
+lsmeans
+```
+
+# Vocal (descriptive)
+```{r}
+describe.vocal <- 
+  with(
+    disbud.dat.imp,
+    describeBy(Vocal/Handle_time*10, group = Treatment)
+  )
+
+#tincture
+tincture.mean <- lapply(analysis, function(x) {
+  describe.vocal[["analyses"]][[x]][["T-CD-T"]][["median"]]})
+mean(as.data.frame(tincture.mean))
+
+tincture.sd <- lapply(analysis, function(x) {
+  describe.vocal[["analyses"]][[x]][["T-CD-T"]][["se"]]})
+mean(as.data.frame(tincture.sd))
+
+
+#lidocaine
+lidocaine.mean <- lapply(analysis, function(x) {
+  describe.vocal[["analyses"]][[x]][["LA-CD"]][["mean"]]})
+mean(as.data.frame(lidocaine.mean))
+
+lidocaine.sd <- lapply(analysis, function(x) {
+  describe.vocal[["analyses"]][[x]][["LA-CD"]][["se"]]})
+mean(as.data.frame(lidocaine.sd))
+
+
+#sham
+sham.mean <- lapply(analysis, function(x) {
+  describe.vocal[["analyses"]][[x]][["SD"]][["mean"]]})
+mean(as.data.frame(sham.mean))
+
+sham.sd <- lapply(analysis, function(x) {
+  describe.vocal[["analyses"]][[x]][["SD"]][["se"]]})
+mean(as.data.frame(sham.sd))
+```
+
+# Fall (descriptive)
+```{r}
+describe.fall <- 
+  with(
+    disbud.dat.imp,
+    describeBy(Fall/Handle_time*10, group = Treatment)
+  )
+
+#tincture
+tincture.mean <- lapply(analysis, function(x) {
+  describe.fall[["analyses"]][[x]][["T-CD-T"]][["mean"]]})
+mean(as.data.frame(tincture.mean))
+
+tincture.sd <- lapply(analysis, function(x) {
+  describe.fall[["analyses"]][[x]][["T-CD-T"]][["se"]]})
+mean(as.data.frame(tincture.sd))
+
+
+#lidocaine
+lidocaine.mean <- lapply(analysis, function(x) {
+  describe.fall[["analyses"]][[x]][["LA-CD"]][["mean"]]})
+mean(as.data.frame(lidocaine.mean))
+
+lidocaine.sd <- lapply(analysis, function(x) {
+  describe.fall[["analyses"]][[x]][["LA-CD"]][["se"]]})
+mean(as.data.frame(lidocaine.sd))
+
+
+#sham
+sham.mean <- lapply(analysis, function(x) {
+  describe.fall[["analyses"]][[x]][["SD"]][["mean"]]})
+mean(as.data.frame(sham.mean))
+
+sham.sd <- lapply(analysis, function(x) {
+  describe.fall[["analyses"]][[x]][["SD"]][["se"]]})
+mean(as.data.frame(sham.sd))
+```
+
+# Rear (descriptive)
+```{r}
+describe.rear <- 
+  with(
+    disbud.dat.imp,
+    describeBy(Rear/Handle_time*10, group = Treatment)
+  )
+
+#tincture
+tincture.mean <- lapply(analysis, function(x) {
+  describe.rear[["analyses"]][[x]][["T-CD-T"]][["mean"]]})
+mean(as.data.frame(tincture.mean))
+
+tincture.sd <- lapply(analysis, function(x) {
+  describe.rear[["analyses"]][[x]][["T-CD-T"]][["se"]]})
+mean(as.data.frame(tincture.sd))
+
+
+#lidocaine
+lidocaine.mean <- lapply(analysis, function(x) {
+  describe.rear[["analyses"]][[x]][["LA-CD"]][["mean"]]})
+mean(as.data.frame(lidocaine.mean))
+
+lidocaine.sd <- lapply(analysis, function(x) {
+  describe.rear[["analyses"]][[x]][["LA-CD"]][["se"]]})
+mean(as.data.frame(lidocaine.sd))
+
+
+#sham
+sham.mean <- lapply(analysis, function(x) {
+  describe.rear[["analyses"]][[x]][["SD"]][["mean"]]})
+mean(as.data.frame(sham.mean))
+
+sham.sd <- lapply(analysis, function(x) {
+  describe.rear[["analyses"]][[x]][["SD"]][["se"]]})
+mean(as.data.frame(sham.sd))
+```
+
+# Behavior after disbudding
+```{r, include = F}
+####MICE for post disbud behavior####
+
+#percent of missing observations
+{
+  (nrow(filter(behavior.dat.post, is.na(Jerk))) + nrow(filter(behavior.dat.baseline, is.na(JerkBaseline))))/ (nrow(behavior.dat.post) + nrow(behavior.dat.baseline))
+  (nrow(filter(behavior.dat.post, is.na(Shake))) + nrow(filter(behavior.dat.baseline, is.na(ShakeBaseline))))/ (nrow(behavior.dat.post) + nrow(behavior.dat.baseline))
+  (nrow(filter(behavior.dat.post, is.na(Rub))) + nrow(filter(behavior.dat.baseline, is.na(RubBaseline))))/ (nrow(behavior.dat.post) + nrow(behavior.dat.baseline))
+  (nrow(filter(behavior.dat.post, is.na(Hoof_rub))) + nrow(filter(behavior.dat.baseline, is.na(Hoof_rubBaseline))))/ (nrow(behavior.dat.post) + nrow(behavior.dat.baseline))
+  (nrow(filter(behavior.dat.post, is.na(Ear))) + nrow(filter(behavior.dat.baseline, is.na(EarBaseline))))/ (nrow(behavior.dat.post) + nrow(behavior.dat.baseline))
+  (nrow(filter(behavior.dat.post, is.na(Up_sec))) + nrow(filter(behavior.dat.baseline, is.na(Up_secBaseline))))/ (nrow(behavior.dat.post) + nrow(behavior.dat.baseline))
+  (nrow(filter(behavior.dat.post, is.na(Oral))) + nrow(filter(behavior.dat.baseline, is.na(OralBaseline))))/ (nrow(behavior.dat.post) + nrow(behavior.dat.baseline))
+  (nrow(filter(behavior.dat.post, is.na(Rum_sec))) + nrow(filter(behavior.dat.baseline, is.na(Rum_secBaseline))))/ (nrow(behavior.dat.post) + nrow(behavior.dat.baseline))
+  (nrow(filter(behavior.dat.post, is.na(Transitions))) + nrow(filter(behavior.dat.baseline, is.na(TransitionsBaseline))))/ (nrow(behavior.dat.post) + nrow(behavior.dat.baseline))
+}
+
+#add interactions
+{
+  behavior.dat.post <- 
+    behavior.dat.post %>%
+    mutate(Treatment.L.20 = Treatment.L*Minute.20) %>%
+    mutate(Treatment.T.20 = Treatment.T*Minute.20) %>%
+    mutate(Treatment.S.20 = Treatment.S*Minute.20) %>%
+    mutate(Treatment.L.40 = Treatment.L*Minute.40) %>%
+    mutate(Treatment.T.40 = Treatment.T*Minute.40) %>%
+    mutate(Treatment.S.40 = Treatment.S*Minute.40) %>%
+    mutate(Treatment.L.60 = Treatment.L*Minute.60) %>%
+    mutate(Treatment.T.60 = Treatment.T*Minute.60) %>%
+    mutate(Treatment.S.60 = Treatment.S*Minute.60) %>%
+    mutate(Treatment.L.80 = Treatment.L*Minute.80) %>%
+    mutate(Treatment.T.80 = Treatment.T*Minute.80) %>%
+    mutate(Treatment.S.80 = Treatment.S*Minute.80) %>%
+    mutate(Treatment.L.100 = Treatment.L*Minute.100) %>%
+    mutate(Treatment.T.100 = Treatment.T*Minute.100) %>%
+    mutate(Treatment.S.100 = Treatment.S*Minute.100) %>%
+    mutate(Treatment.L.120 = Treatment.L*Minute.120) %>%
+    mutate(Treatment.T.120 = Treatment.T*Minute.120) %>%
+    mutate(Treatment.S.120 = Treatment.S*Minute.120) %>%
+    mutate(Treatment.L.140 = Treatment.L*Minute.140) %>%
+    mutate(Treatment.T.140 = Treatment.T*Minute.140) %>%
+    mutate(Treatment.S.140 = Treatment.S*Minute.140) %>%
+    mutate(Treatment.L.160 = Treatment.L*Minute.160) %>%
+    mutate(Treatment.T.160 = Treatment.T*Minute.160) %>%
+    mutate(Treatment.S.160 = Treatment.S*Minute.160) %>%
+    mutate(Treatment.L.180 = Treatment.L*Minute.180) %>%
+    mutate(Treatment.T.180 = Treatment.T*Minute.180) %>%
+    mutate(Treatment.S.180 = Treatment.S*Minute.180) %>%
+    mutate(Treatment.L.200 = Treatment.L*Minute.200) %>%
+    mutate(Treatment.T.200 = Treatment.T*Minute.200) %>%
+    mutate(Treatment.S.200 = Treatment.S*Minute.200) %>%
+    mutate(Treatment.L.220 = Treatment.L*Minute.220) %>%
+    mutate(Treatment.T.220 = Treatment.T*Minute.220) %>%
+    mutate(Treatment.S.220 = Treatment.S*Minute.220) %>%
+    mutate(Treatment.L.240 = Treatment.L*Minute.240) %>%
+    mutate(Treatment.T.240 = Treatment.T*Minute.240) %>%
+    mutate(Treatment.S.240 = Treatment.S*Minute.240) %>%
+    mutate(Treatment.L.260 = Treatment.L*Minute.260) %>%
+    mutate(Treatment.T.260 = Treatment.T*Minute.260) %>%
+    mutate(Treatment.S.260 = Treatment.S*Minute.260) %>%
+    mutate(Treatment.L.280 = Treatment.L*Minute.280) %>%
+    mutate(Treatment.T.280 = Treatment.T*Minute.280) %>%
+    mutate(Treatment.S.280 = Treatment.S*Minute.280) %>%
+    mutate(Treatment.L.300 = Treatment.L*Minute.300) %>%
+    mutate(Treatment.T.300 = Treatment.T*Minute.300) %>%
+    mutate(Treatment.S.300 = Treatment.S*Minute.300) %>%
+    mutate(Treatment.L.320 = Treatment.L*Minute.320) %>%
+    mutate(Treatment.T.320 = Treatment.T*Minute.320) %>%
+    mutate(Treatment.S.320 = Treatment.S*Minute.320) %>%
+    mutate(Treatment.L.340 = Treatment.L*Minute.340) %>%
+    mutate(Treatment.T.340 = Treatment.T*Minute.340) %>%
+    mutate(Treatment.S.340 = Treatment.S*Minute.340) %>%
+    mutate(Treatment.L.360 = Treatment.L*Minute.360) %>%
+    mutate(Treatment.T.360 = Treatment.T*Minute.360) %>%
+    mutate(Treatment.S.360 = Treatment.S*Minute.360)
+  
+  
+}
+
+
+# change predictor matrix
+predM = mice(behavior.dat.post, seed = 1, maxit = 0)$predictorMatrix
+{
+  predM[, 
+        c("Age")] = 0
+  predM[c("JerkBaseline", "ShakeBaseline", "RubBaseline", "Hoof_rubBaseline", "EarBaseline", "DownBaseline", "Down_secBaseline", "UpBaseline", "Up_secBaseline", "OralBaseline", "Rum_secBaseline", "RankBaseline", "TransitionsBaseline")
+        ,] = 0
+  predM[, 
+        c("JerkBaseline", "ShakeBaseline", "RubBaseline", "Hoof_rubBaseline", "EarBaseline", "DownBaseline", "Down_secBaseline", "UpBaseline", "Up_secBaseline", "OralBaseline", "Rum_secBaseline", "RankBaseline", "TransitionsBaseline",
+          "Jerk", "Shake", "Rub", "Hoof_rub", "Ear", "Down", "Down_sec", "Up", "Up_sec", "Oral", "Rum_sec", "Rank", "Transitions")] = 0
+  predM[c("JerkBaseline", "ShakeBaseline", "RubBaseline", "Hoof_rubBaseline", "EarBaseline", "DownBaseline", "Down_secBaseline", "UpBaseline", "Up_secBaseline", "OralBaseline", "Rum_secBaseline", "RankBaseline", "TransitionsBaseline"), 
+        c("Hutch", "Breed", "Order")] = 1
+  predM[, c("ID")] = -2 #subject effect
+  predM[, c("Treatment.L", "Treatment.T", "Treatment.S", "Minute.20", "Minute.40", "Minute.60", "Minute.80", "Minute.100", "Minute.120", "Minute.140", "Minute.160", "Minute.180", "Minute.200", "Minute.220", "Minute.240", "Minute.260", "Minute.280", "Minute.300", "Minute.320", "Minute.340", "Minute.360", "Hour")] = 0
+  
+  predM["Jerk", "JerkBaseline"] = 1
+  predM["Shake", "ShakeBaseline"] = 1
+  predM["Rub", "RubBaseline"] = 1
+  predM["Hoof_rub", "Hoof_rubBaseline"] = 1
+  predM["Ear", "EarBaseline"] = 1
+  predM["Down", "DownBaseline"] = 1
+  predM["Down_sec", "Down_secBaseline"] = 1
+  predM["Up", "UpBaseline"] = 1
+  predM["Up_sec", "Up_secBaseline"] = 1
+  predM["Oral", "OralBaseline"] = 1
+  predM["Rum_sec", "Rum_secBaseline"] = 1
+  predM["Rank", "RankBaseline"] = 1
+  predM["Transitions", "TransitionsBaseline"] = 1
+  
+  predM["JerkBaseline", "Jerk"] = 1
+  predM["ShakeBaseline", "Shake"] = 1 
+  predM["RubBaseline", "Rub"] = 1 
+  predM["Hoof_rubBaseline", "Hoof_rub"] = 1
+  predM["EarBaseline", "Ear"] = 1
+  predM["DownBaseline", "Down"] = 1
+  predM["Down_secBaseline", "Down_sec"] = 1
+  predM["UpBaseline", "Up"] = 1
+  predM["Up_secBaseline", "Up_sec"] = 1
+  predM["OralBaseline", "Oral"] = 1
+  predM["Rum_secBaseline", "Rum_sec"] = 1
+  predM["RankBaseline", "Rank"] = 1
+  predM["TransitionsBaseline", "Transitions"] = 1
+  
+  predM["Ear", c("Treatment.T.140", "Treatment.T.200")] = 0
+  predM["Jerk", c("Treatment.T.200")] = 0
+  predM["Shake", c("Treatment.T.200")] = 0
+  predM["Rub", c("Treatment.T.200")] = 0
+  predM["Hoof_rub", c("Treatment.T.200")] = 0
+  predM["Oral", c("Treatment.T.140", "Treatment.T.200")] = 0
+  predM["Rum_sec", c("Treatment.T.200", "Treatment.L.360")] = 0
+  predM["Rank", c("Treatment.T.200")] = 0
+}
+
+#table(filter(behavior.dat.post, !is.na(Rank))$Treatment, filter(behavior.dat.post, !is.na(Rank))$Minute)
+
+#check method
+meth = mice(behavior.dat.post, seed = 1, maxit = 0)$method
+{
+  meth[8:20] = "rf"
+  meth[43:55] = "rf"
+  meth["Rank"] = "polr"
+}
+
+#set ID as integer
+behavior.dat.post$ID <- as.integer(behavior.dat.post$ID)
+levels(behavior.dat.post$Breed)[levels(behavior.dat.post$Breed) == "Swedish Red"] <- "Swedish_red"
+
+#impute missing data
+imp <- 
+  countimp(behavior.dat.post, 
+           maxit = 5, 
+           m = 50,
+           predictorMatrix = predM, 
+           method = meth, 
+           print =  FALSE,
+           seed = 1)
+
+imp.dat.long <- mice::complete(imp, action = "long", include = T) 
+
+# Convert back to mids type - mice can work with this type
+behavior.dat.post.imp <- as.mids(imp.dat.long)
+
+behavior.dat.post.imp[["data"]][["ID"]] <- as.factor(behavior.dat.post.imp[["data"]][["ID"]])
+behavior.dat.post.imp[["data"]][["Minute"]] <- as.factor(behavior.dat.post.imp[["data"]][["Minute"]])
+```
+
+# Ear flicks (p)
+```{r}
+model.ear <- 
+  with(
+    behavior.dat.post.imp,
+    glmmTMB(
+      Ear ~ scale(EarBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(Minute-1|ID), 
+      family = poisson,
+      verbose = F, 
+      REML = F
+    )
+  )
+
+simulationOutput <- simulateResiduals(model.ear$ana[[40]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled Chisq-tests
+analysis <- 1:50
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.ear$ana[[x]], test.statistic = "Chisq")[1,1]})), 1)
+
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.ear$ana[[x]], test.statistic = "Chisq")[2,1]})), 2)
+
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.ear$ana[[x]], test.statistic = "Chisq")[3,1]})), 17)
+
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.ear$ana[[x]], test.statistic = "Chisq")[4,1]})), 34)
+
+
+##lsmeans
+lsmeans <- emmeans(model.ear, ~ Treatment|Minute, type = "response")
+lsmeans2 <- emmeans(model.ear, ~ Treatment, type = "response")
+lsmeans2
+lsmeans3 <- emmeans(model.ear, ~ Minute|Treatment, type = "response")
+lsmeans3
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+multcomp::cld(lsmeans2, alpha = .05)
+multcomp::cld(lsmeans3, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+confint(contrast(regrid(lsmeans2), ratio = F, method = "pairwise"))
+confint(contrast(regrid(lsmeans3), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.ear, ~ Treatment), ratio = F, method = "pairwise")
+
+#pre disbud
+imp.dat.long2 <- imp.dat.long %>%
+  filter(Minute == "20")
+
+behavior.dat.post.imp2 <- as.mids(imp.dat.long2)
+
+
+model.ear.pre <- 
+  with(
+    behavior.dat.post.imp2,
+    glmmTMB(
+      EarBaseline ~ Treatment + (1|Hutch), 
+      family = poisson, 
+      verbose = F, 
+      REML = F
+    )
+  )
+
+chiSqValues.treatment <- lapply(analysis, function(x) {
+  Anova(model.ear.pre$ana[[x]], test.statistic = "Chisq")[1,1]})
+chiSqValues.treatment <- as.data.frame(chiSqValues.treatment)
+miceadds::micombine.chisquare(chiSqValues.treatment, 2)
+
+
+#predict Y
+predict.ear.post <- 
+  emmip(
+    model.ear, 
+    Treatment ~ Minute,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  )
+
+predict.ear.pre <- 
+  emmip(
+    model.ear.pre, 
+    ~ Treatment,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) %>%
+  mutate(Minute = "-40")
+
+#merge with baseline means
+predict.ear <- rbind(predict.ear.post, predict.ear.pre)
+
+predict.ear$Minute <- as.numeric(levels(predict.ear$Minute))[predict.ear$Minute]
+
+#make plot
+{
+  ggplot(data = predict.ear, 
+         aes(x = Minute, y = yvar, color = Treatment, linetype = Treatment)) + 
+    
+    scale_color_jama() +
+    
+    scale_fill_jama() +
+    
+    geom_line(size = 1) + 
+    
+    geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+                alpha = 0.1, 
+                inherit.aes = T,
+                colour = NA) +
+    
+    geom_point() +
+    
+    labs(
+      x = "Time after disbudding, min", 
+      y = "Ear flick rate, count 5-min\u207B\u00B9"
+    ) +
+    
+    scale_y_continuous(
+      breaks = seq(0, 30, 5), 
+      minor_breaks = seq(0, 30, 1), 
+      limits = c(0, NA),
+      expand = c(0, 0)
+    ) +
+    
+    scale_x_continuous(breaks = seq(20, 360, 40),
+                       expand = c(.01, .01)) +
+    
+    theme(
+      plot.title = element_text(hjust = .5),
+      legend.position = c(.15, .85),
+      legend.background = element_rect(NA)
+    ) + 
+    
+    geom_text(label = "Baseline", x = -40, y = 0.15, color = "gray40", family = "Times New Roman", size = 4, hjust = 0, vjust = 0) +
+    
+    ggsave("figure_ear_flicks.png", width = 8, height = 5)
+}
+```
+
+# Jerks (p)
+```{r}
+model.jerk <- 
+  with(
+    behavior.dat.post.imp,
+    glmmTMB(
+      Jerk ~ scale(JerkBaseline) + Treatment*Minute + (1|Hutch) + (1|ID) + ar1(Minute-1|ID), 
+      family = poisson, 
+      verbose = F, 
+      REML = F
+    )
+  )
+
+
+simulationOutput <- simulateResiduals(model.jerk$ana[[10]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.jerk$ana[[x]], test.statistic = "Chisq")[1,1]})), 1)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.jerk$ana[[x]], test.statistic = "Chisq")[2,1]})), 2)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.jerk$ana[[x]], test.statistic = "Chisq")[3,1]})), 17)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.jerk$ana[[x]], test.statistic = "Chisq")[4,1]})), 34)
+
+##lsmeans
+lsmeans <- emmeans(model.jerk, ~ Treatment|Minute, type = "response")
+lsmeans2 <- emmeans(model.jerk, ~ Treatment, type = "response")
+lsmeans2
+lsmeans3 <- emmeans(model.jerk, ~ Minute|Treatment, type = "response")
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+multcomp::cld(lsmeans2, alpha = .05)
+multcomp::cld(lsmeans3, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+confint(contrast(regrid(lsmeans2), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.jerk, ~ Treatment), ratio = F, method = "pairwise")
+contrast(emmeans(model.jerk, ~ Treatment|Minute), ratio = F, method = "pairwise")
+
+
+#pre disbud
+model.jerk.pre <- 
+  with(
+    behavior.dat.post.imp2,
+    glmmTMB(
+      JerkBaseline ~ Treatment + (1|Hutch), 
+      family = poisson, 
+      verbose = F, 
+      REML = F
+    )
+  )
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.jerk.pre$ana[[x]], test.statistic = "Chisq")[1,1]})), 2)
+
+
+#predict Y
+predict.jerk.post <- 
+  emmip(
+    model.jerk, 
+    Treatment ~ Minute,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  )
+
+predict.jerk.pre <- 
+  emmip(
+    model.jerk.pre, 
+    ~ Treatment,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) %>%
+  mutate(Minute = "-40")
+
+#merge with baseline means
+predict.jerk <- rbind(predict.jerk.post, predict.jerk.pre)
+
+predict.jerk$Minute <- as.numeric(levels(predict.jerk$Minute))[predict.jerk$Minute]
+
+#make plot
+{
+  ggplot(data = predict.jerk, 
+         aes(x = Minute, y = yvar, color = Treatment, linetype = Treatment)) + 
+    
+    scale_color_jama() +
+    
+    scale_fill_jama() +
+    
+    geom_line(size = 1) + 
+    
+    geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+                alpha = 0.1, 
+                inherit.aes = T,
+                colour = NA) +
+    geom_point() +
+    
+    labs(
+      x = "Time after disbudding, min", 
+      y = "Head jerk rate, count 5-min\u207B\u00B9"
+    ) +
+    
+    scale_y_continuous(
+      breaks = seq(0, 7, 1), 
+      minor_breaks = seq(0, 7, 1), 
+      limits = c(0, NA),
+      expand = c(0,0)
+    ) +
+    
+    scale_x_continuous(breaks = seq(20, 360, 40),
+                       expand = c(.01, .01)) +
+    
+    theme(
+      plot.title = element_text(hjust = .5),
+      legend.position = c(.15, .85),
+      legend.background = element_rect(NA)
+    ) +
+    
+    #geom_text(label = "a", x = 60, y = 1.86+.25, color = "gray40", family = "Times New Roman", size = 5) + 
+    #geom_text(label = "ab", x = 60, y = 1.26+.15, color = "gray40", family = "Times New Roman", size = 5) +
+    #geom_text(label = "b", x = 60, y = 0.28-.15, color = "gray40", family = "Times New Roman", size = 5) +
+    
+    geom_text(label = "Baseline", x = -40, y = 0.05, color = "gray40", family = "Times New Roman", size = 4, hjust = 0, vjust = 0) +
+    
+    ggsave("figure_jerk.png", width = 8, height = 5)
+}
+```
+
+# Shakes (p, summed over hours)
+```{r}
+#summed over hour
+subset.shake <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Age, Treatment, Hutch, Order, Hour, Shake, ShakeBaseline)) %>%
+  group_by(.imp, ID, Breed, Age, Treatment, Hutch, Order, Hour) %>%
+  summarise_all(funs(sum(.))) %>%
+  mutate(Hour = as.factor(Hour))
+
+subset.shake <- as.mids(subset.shake)
+
+
+model.shake <- 
+  with(
+    subset.shake,
+    glmmTMB(
+      Shake ~ scale(ShakeBaseline) + Treatment*Hour + (1|Hutch) + (1|ID) + ar1(Hour-1|ID), 
+      family = poisson(),
+      verbose = F, 
+      REML = F
+    )
+  )
+
+
+
+simulationOutput <- simulateResiduals(model.shake$ana[[10]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.shake$ana[[x]], test.statistic = "Chisq")[1,1]})), 1)
+
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.shake$ana[[x]], test.statistic = "Chisq")[2,1]})), 2)
+
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.shake$ana[[x]], test.statistic = "Chisq")[3,1]})), 5)
+
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.shake$ana[[x]], test.statistic = "Chisq")[4,1]})), 10)
+
+
+##lsmeans
+lsmeans <- emmeans(model.shake, ~ Treatment|Hour, type = "response")
+lsmeans2 <- emmeans(model.shake, ~ Treatment, type = "response")
+lsmeans2
+lsmeans3 <- emmeans(model.shake, ~ Hour|Treatment, type = "response")
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+multcomp::cld(lsmeans2, alpha = .05)
+multcomp::cld(lsmeans3, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+confint(contrast(regrid(lsmeans2), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.shake, ~ Treatment|Hour), ratio = F, method = "pairwise")
+contrast(emmeans(model.shake, ~ Treatment), ratio = F, method = "pairwise")
+
+
+#pre disbud
+subset.shake.2 <- mice::complete(subset.shake, action = "long", include = T) %>%
+  filter(Hour == "1") 
+
+subset.shake.2 <- as.mids(subset.shake.2)
+
+
+model.shake.pre <- 
+  with(
+    subset.shake.2,
+    glmmTMB(
+      ShakeBaseline ~ Treatment + (1|Hutch), 
+      family = poisson(),
+      verbose = F, 
+      REML = F
+    )
+  )
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.shake.pre$ana[[x]], test.statistic = "Chisq")[1,1]})), 2)
+
+#predict Y
+predict.shake.post <- 
+  emmip(
+    model.shake, 
+    Treatment ~ Hour,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  )
+
+predict.shake.pre <- 
+  emmip(
+    model.shake.pre, 
+    ~ Treatment,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) %>%
+  mutate(Hour = "0")
+
+
+#merge with baseline means
+predict.shake <- rbind(predict.shake.post, predict.shake.pre)
+
+
+predict.shake$Hour <- as.numeric(levels(predict.shake$Hour))[predict.shake$Hour]
+
+
+#make plot
+{
+  ggplot(data = predict.shake, 
+         aes(x = Hour, y = yvar, color = Treatment, linetype = Treatment)) + 
+    
+    scale_color_jama() +
+    
+    scale_fill_jama() +
+    
+    geom_line(size = 1) + 
+    
+    geom_ribbon(aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+                alpha = 0.1, 
+                inherit.aes = T,
+                colour = NA) +
+    geom_point() +
+    
+    labs(
+      x = "Time interval after disbudding, min", 
+      y = "Head shake rate, count 15-min\u207B\u00B9"
+    ) +
+    
+    scale_y_continuous(
+      breaks = seq(0, 5, 1), 
+      minor_breaks = seq(0, 5, 1), 
+      limits = c(0, NA),
+      expand = c(0, 0)
+    ) +
+    
+    scale_x_continuous(
+      breaks = seq(0, 6, 1),
+      minor_breaks = seq(0, 6, 1),
+      expand = c(.05, .05),
+      labels = c("Baseline", "20-60", "80-120", "140-180", "200-240", "260-300", "320-360")
+      ) +
+    
+    
+    theme(
+      plot.title = element_text(hjust = .5),
+      legend.position = c(.85, .85),
+      legend.background = element_rect(NA)
+    ) +
+    
+    geom_text(label = "a", x = 2, y = 2.76+.2, color = "gray40", family = "Times New Roman", size = 5) + 
+    geom_text(label = "ab", x = 2, y = 0.83+.2, color = "gray40", family = "Times New Roman", size = 5) +
+    geom_text(label = "b", x = 2, y = 0.72-.2, color = "gray40", family = "Times New Roman", size = 5) +
+    #geom_text(label = "Baseline", x = -.5, y = 0.05, color = "gray40", family = "Times New Roman", size = 4, hjust = 0, vjust = 0) 
+    
+    ggsave("figure_shake.png", width = 8, height = 5)
+}
+```
+
+# Oral summed hours (nb2, summed over all)
+```{r}
+#summed over all
+subset.oral <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Age, Treatment, Hutch, Order, Oral, OralBaseline)) %>%
+  group_by(.imp, ID, Breed, Age, Treatment, Hutch, Order) %>%
+  summarise_all(funs(sum(.)))
+
+subset.oral <- as.mids(subset.oral) 
+
+model.oral <- 
+  with(
+    subset.oral,
+    glmmTMB(
+      Oral ~ scale(OralBaseline) + Treatment + (1|Hutch), 
+      family = nbinom2(),
+      verbose = F, 
+      REML = F
+    )
+  )
+
+
+simulationOutput <- simulateResiduals(model.oral$ana[[20]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.oral.h$ana[[x]], test.statistic = "Chisq")[1,1]})), 1)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.oral$ana[[x]], test.statistic = "Chisq")[2,1]})), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.oral, ~ Treatment, type = "response")
+lsmeans
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.oral, ~ Treatment, type = "response"), ratio = F, method = "pairwise")
+
+#pre disbud
+model.oral.pre <- 
+  with(
+    subset.oral,
+    glmmTMB(
+      OralBaseline ~ Treatment + (1|Hutch), 
+      family = nbinom2(),
+      verbose = F, 
+      REML = F
+    )
+  )
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.oral.pre$ana[[x]], test.statistic = "Chisq")[1,1]})), 2)
+```
+
+# Standing (betabinomial, summed over hours)
+```{r}
+subset.stand <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Age, Treatment, Hutch, Order, Hour, Up_sec, Down_sec, Up_secBaseline, Down_secBaseline)) %>%
+  group_by(.imp, ID, Breed, Age, Treatment, Hutch, Order, Hour) %>%
+  summarise_all(funs(sum(.))) 
+
+subset.stand <- as.mids(subset.stand)
+
+model.stand <- 
+  with(
+    subset.stand,
+    glmmTMB(
+      cbind(Up_sec, 900-Up_sec) ~ scale(Up_secBaseline) + Treatment*Hour + (1|Hutch) + (1|ID) + ar1(Hour-1|ID), 
+      family = betabinomial(),
+      verbose = F, 
+      REML = F
+    )
+  )
+
+simulationOutput <- simulateResiduals(model.stand$ana[[20]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.stand$ana[[x]], test.statistic = "Chisq")[1,1]})), 1)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.stand$ana[[x]], test.statistic = "Chisq")[2,1]})), 2)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.stand$ana[[x]], test.statistic = "Chisq")[3,1]})), 5)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.stand$ana[[x]], test.statistic = "Chisq")[4,1]})), 10)
+
+
+##lsmeans
+lsmeans <- emmeans(model.stand, ~ Treatment|Hour, type = "response")
+lsmeans2 <- emmeans(model.stand, ~ Treatment, type = "response")
+lsmeans2
+lsmeans3 <- emmeans(model.stand, ~ Hour|Treatment, type = "response")
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+multcomp::cld(lsmeans2, alpha = .05)
+multcomp::cld(lsmeans3, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+confint(contrast(regrid(lsmeans2), ratio = F, method = "pairwise"))
+confint(contrast(regrid(lsmeans3), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.stand, ~ Treatment|Hour, type = "response"), ratio = F, method = "pairwise")
+contrast(emmeans(model.stand, ~ Treatment, type = "response"), ratio = F, method = "pairwise")
+
+#pre disbud
+subset.stand.2 <- mice::complete(subset.stand, action = "long", include = T) %>%
+  filter(Hour == "1") 
+
+subset.stand.2 <- as.mids(subset.stand.2)
+
+model.stand.pre <- 
+  with(
+    subset.stand.2,
+    glmmTMB(
+      cbind(Up_secBaseline, 900-Up_secBaseline) ~ Treatment + (1|Hutch), 
+      family = betabinomial,
+      verbose = F, 
+      REML = F
+    )
+  )
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.stand.pre$ana[[x]], test.statistic = "Chisq")[1,1]})), 2)
+
+
+
+#predict Y
+predict.stand.post <- 
+  emmip(
+    model.stand, 
+    Treatment ~ Hour,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  )
+
+predict.stand.pre <- 
+  emmip(
+    model.stand.pre, 
+    ~ Treatment,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) %>%
+  mutate(Hour = "0") 
+
+#merge with baseline means
+predict.stand <- rbind(predict.stand.post, predict.stand.pre)
+
+predict.stand$Hour <- as.numeric(levels(predict.stand$Hour))[predict.stand$Hour]
+
+#make plot
+{
+  ggplot(
+    data = predict.stand, 
+    aes(x = Hour, 
+        #y = yvar,
+        y = yvar*15*60, 
+        color = Treatment, 
+        linetype = Treatment)
+  ) + 
+    
+    scale_color_jama() +
+    
+    scale_fill_jama() +
+    
+    geom_line(size = 1) + 
+    
+    geom_ribbon(
+      #aes(ymin = LCL, ymax = UCL, fill = Treatment), 
+      aes(ymin = LCL*15*60, ymax = UCL*15*60, fill = Treatment), 
+      alpha = 0.1, 
+      inherit.aes = T,
+      colour = NA
+    ) +
+    
+    geom_point() +
+    
+    labs(
+      x = "Time interval after disbudding, min", 
+      #y = "Standing, proportion of 15 min"
+      y = "Standing rate, s 15-min\u207B\u00B9"
+    ) +
+    
+    scale_y_continuous(
+      breaks = seq(0, 360, 60), 
+      minor_breaks = seq(0, 360, 30), 
+      limits = c(0, NA),
+      expand = c(0, 0)
+    ) +
+    
+    scale_x_continuous(
+      breaks = seq(0, 6, 1),
+      minor_breaks = seq(0, 6, 1),
+      expand = c(.05, .05),
+      labels = c("Baseline", "20-60", "80-120", "140-180", "200-240", "260-300", "320-360")
+      ) +
+    
+    theme(
+      plot.title = element_text(hjust = .5),
+      legend.position = c(.85, .85),
+      legend.background = element_rect(NA)
+    ) +
+    
+    ggsave("figure_standing_rate.png", width = 8, height = 5)
+}
+```
+
+# Ruminating (betabinomial, summed over hours)
+```{r}
+subset.rum <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Age, Treatment, Hutch, Order, Hour, Rum_sec, Rum_secBaseline)) %>%
+  group_by(.imp, ID, Breed, Age, Treatment, Hutch, Order, Hour) %>%
+  summarise_all(funs(sum(.)))
+
+subset.rum <- as.mids(subset.rum)
+
+model.rum <- 
+  with(
+    subset.rum,
+    glmmTMB(
+      cbind(Rum_sec, 900-Rum_sec) ~ scale(Rum_secBaseline) + Treatment*Hour + (1|Hutch) + (1|ID) + ar1(Hour-1|ID), 
+      family = betabinomial(),
+      verbose = F, 
+      REML = F
+    )
+  )
+
+
+simulationOutput <- simulateResiduals(model.rum$ana[[1]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.rum$ana[[x]], test.statistic = "Chisq")[1,1]})), 1)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.rum$ana[[x]], test.statistic = "Chisq")[2,1]})), 2)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.rum$ana[[x]], test.statistic = "Chisq")[3,1]})), 5)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.rum$ana[[x]], test.statistic = "Chisq")[4,1]})), 10)
+
+##lsmeans
+lsmeans <- emmeans(model.rum, ~ Treatment|Hour, type = "response")
+lsmeans2 <- emmeans(model.rum, ~ Treatment, type = "response")
+lsmeans2
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+multcomp::cld(lsmeans2, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+confint(contrast(regrid(lsmeans2), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.rum, ~ Treatment|Hour, type = "response"), ratio = F, method = "pairwise")
+contrast(emmeans(model.rum, ~ Treatment, type = "response"), ratio = F, method = "pairwise")
+
+#pre disbud
+subset.rum.2 <- mice::complete(subset.rum, action = "long", include = T) %>%
+  filter(Hour == "1") 
+
+subset.rum.2 <- as.mids(subset.rum.2)
+
+model.rum.pre <- 
+  with(
+    subset.rum.2,
+    glmmTMB(
+      cbind(Rum_secBaseline, 900-Rum_secBaseline) ~ Treatment + (1|Hutch), 
+      family = betabinomial,
+      verbose = F, 
+      REML = F
+    )
+  )
+
+chiSqValues.treatment <- lapply(analysis, function(x) {
+  Anova(model.rum.pre$ana[[x]], test.statistic = "Chisq")[1,1]})
+miceadds::micombine.chisquare(as.data.frame(chiSqValues.treatment), 2)
+
+#predict Y
+predict.rum.post <- 
+  emmip(
+    model.rum, 
+    Treatment ~ Hour,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  )
+
+predict.rum.pre <- 
+  emmip(
+    model.rum.pre, 
+    ~ Treatment,
+    CIs = TRUE, 
+    plotit = FALSE, 
+    type = "response",
+    level = .8
+  ) %>%
+  mutate(Hour = "0") 
+
+#merge with baseline means
+predict.rum <- rbind(predict.rum.post, predict.rum.pre)
+
+predict.rum$Hour <- as.numeric(levels(predict.rum$Hour))[predict.rum$Hour]
+
+
+#make plot
+{
+ggplot(data = predict.rum, 
+       aes(x = Hour, y = yvar*15*60, color = Treatment, linetype = Treatment)) + 
+  
+  scale_color_jama() +
+  
+  scale_fill_jama() +
+  
+  geom_line(size = 1) + 
+  
+  geom_ribbon(aes(ymin = LCL*15*60, ymax = UCL*15*60, fill = Treatment), 
+              alpha = 0.1, 
+              inherit.aes = T,
+              colour = NA) +
+  geom_point() +
+  
+  labs(
+    x = "Time interval after disbudding, min", 
+    #y = "Ruminating, proportion of 15 min",
+    y = "Ruminating rate, s 15-min\u207B\u00B9"
+  ) +
+  
+  scale_y_continuous(
+    breaks = seq(0, 420, 60), 
+    minor_breaks = seq(0, 420, 30), 
+    limits = c(0, NA),
+    expand = c(0, 0)
+  ) +
+  
+    scale_x_continuous(
+      breaks = seq(0, 6, 1),
+      minor_breaks = seq(0, 6, 1),
+      expand = c(.05, .05),
+      labels = c("Baseline", "20-60", "80-120", "140-180", "200-240", "260-300", "320-360")
+      ) +
+  
+  theme(
+    plot.title = element_text(hjust = .5),
+    legend.position = c(.85, .85),
+    legend.background = element_rect(NA)
+  ) +
+    
+
+  ggsave("figure_rumination_rate.png", width = 8, height = 5)
+}
+```
+
+# Hoof rub  (nb2, summed over all times)
+```{r}
+#means
+  
+means <- 
+  with(
+    behavior.dat.post.imp,
+    describeBy(Hoof_rub, group = Treatment:Minute)
+  )
+
+#max hoof rub
+mean(as.data.frame(lapply(analysis, function(x) {
+  means[["analyses"]][[x]][["LA-CD:80"]][["mean"]]})))
+
+mean(as.data.frame(lapply(analysis, function(x) {
+  means[["analyses"]][[x]][["LA-CD:80"]][["se"]]})))
+
+mean(as.data.frame(lapply(analysis, function(x) {
+  means[["analyses"]][[x]][["T-CD-T:260"]][["mean"]]})))
+
+mean(as.data.frame(lapply(analysis, function(x) {
+  means[["analyses"]][[x]][["T-CD-T:260"]][["se"]]})))
+
+mean(as.data.frame(lapply(analysis, function(x) {
+  means[["analyses"]][[x]][["SD:320"]][["mean"]]})))
+
+mean(as.data.frame(lapply(analysis, function(x) {
+  means[["analyses"]][[x]][["SD:320"]][["se"]]})))
+
+  
+
+
+subset.hoof_rub <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Age, Treatment, Hutch, Order, Hoof_rub, Hoof_rubBaseline)) %>%
+  group_by(.imp, ID, Breed, Age, Treatment, Hutch, Order) %>%
+  summarise_all(funs(sum(.)))
+
+subset.hoof_rub <- as.mids(subset.hoof_rub)
+
+model.hoof <- 
+  with(
+    subset.hoof_rub,
+    glmmTMB(
+      Hoof_rub ~  scale(Hoof_rubBaseline) + Treatment + (1|Hutch), 
+      family = nbinom2(),
+      verbose = F, 
+      REML = F
+      #control = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS"))
+    )
+  )
+
+
+simulationOutput <- simulateResiduals(model.hoof$ana[[50]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.hoof$ana[[x]], test.statistic = "Chisq")[1,1]})), 1)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.hoof$ana[[x]], test.statistic = "Chisq")[2,1]})), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.hoof, ~ Treatment, type = "response")
+lsmeans
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.hoof, ~ Treatment, type = "response"), ratio = F, method = "pairwise")
+
+#pre disbud
+model.hoof.pre <- 
+  with(
+    subset.hoof_rub,
+    glmmTMB(
+      Hoof_rubBaseline ~ Treatment + (1|Hutch), 
+      family = nbinom2,
+      verbose = F, 
+      REML = F
+    )
+  )
+
+chiSqValues.treatment <- lapply(analysis, function(x) {
+  Anova(model.hoof.pre$ana[[x]], test.statistic = "Chisq")[1,1]})
+miceadds::micombine.chisquare(as.data.frame(chiSqValues.treatment), 2)
+```
+
+# Rubs (nb2, summed over all times)
+```{r}
+subset.rub <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Age, Treatment, Hutch, Order, Rub, RubBaseline)) %>%
+  group_by(.imp, ID, Breed, Age, Treatment, Hutch, Order) %>%
+  summarise_all(funs(sum(.)))
+
+
+subset.rub <- as.mids(subset.rub)
+
+model.rub <- 
+  with(
+    subset.rub,
+    glmmTMB(
+      Rub ~ scale(RubBaseline) + Treatment + (1|Hutch), 
+      family = nbinom2(), 
+      #ziformula = ~ 1,
+      verbose = F, 
+      REML = F
+     # control = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS"))
+    )
+  )
+
+simulationOutput <- simulateResiduals(model.rub$ana[[10]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.rub$ana[[x]], test.statistic = "Chisq")[1,1]})), 1)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.rub$ana[[x]], test.statistic = "Chisq")[2,1]})), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.rub, ~ Treatment, type = "response")
+lsmeans
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.rub, ~ Treatment, type = "response"), ratio = F, method = "pairwise")
+
+#pre disbud
+model.rub.pre <- 
+  with(
+    subset.rub,
+    glmmTMB(
+      RubBaseline ~ Treatment + (1|Hutch), 
+      family = nbinom2,
+      verbose = F, 
+      REML = F
+    )
+  )
+
+chiSqValues.treatment <- lapply(analysis, function(x) {
+  Anova(model.rub.pre$ana[[x]], test.statistic = "Chisq")[1,1]})
+miceadds::micombine.chisquare(as.data.frame(chiSqValues.treatment), 2)
+```
+
+# Transitions  (nb2, summed over all times)
+```{r}
+subset.trans <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Age, Treatment, Hutch, Order, Transitions, TransitionsBaseline)) %>%
+  group_by(.imp, ID, Breed, Age, Treatment, Hutch, Order) %>%
+  summarise_all(funs(sum(.)))
+
+
+subset.trans <- as.mids(subset.trans) 
+
+model.trans <- 
+  with(
+    subset.trans,
+    glmmTMB(
+      Transitions ~ scale(TransitionsBaseline) + Treatment + (1|Hutch), 
+      family = nbinom2(), 
+      REML = F
+    )
+  )
+
+
+simulationOutput <- simulateResiduals(model.trans$ana[[50]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.trans$ana[[x]], test.statistic = "Chisq")[1,1]})), 1)
+
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.trans$ana[[x]], test.statistic = "Chisq")[2,1]})), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.trans, ~ Treatment, type = "response")
+lsmeans
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.trans, ~ Treatment, type = "response"), ratio = F, method = "pairwise")
+
+#pre disbud
+model.trans.pre <- 
+  with(
+    subset.trans,
+    glmmTMB(
+      TransitionsBaseline ~ Treatment + (1|Hutch), 
+      family = nbinom2,
+      verbose = F, 
+      REML = F
+    )
+  )
+
+chiSqValues.treatment <- lapply(analysis, function(x) {
+  Anova(model.trans.pre$ana[[x]], test.statistic = "Chisq")[1,1]})
+miceadds::micombine.chisquare(as.data.frame(chiSqValues.treatment), 2)
+```
+
+# Latency to ruminate (nb2)
+```{r}
+subset.lat_rum1 <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Treatment, Hutch, Minute, Rum_sec, Rum_secBaseline)) %>%
+  group_by(.imp, ID) %>%
+  filter(Rum_sec != 0) %>%
+  arrange(Minute) %>%
+  dplyr::slice(1) %>%
+  mutate(Rum_lat = as.numeric(Minute)) %>%
+  filter(.imp != 0)
+  
+
+subset.lat_rum2 <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Treatment, Hutch, Minute, Rum_sec, Rum_secBaseline)) %>%
+  group_by(.imp, ID) %>%
+  filter(all(Rum_sec == 0)) %>%
+  dplyr::slice(1) %>%
+  mutate(Rum_lat = 19) %>%
+  filter(.imp != 0)
+  
+subset.lat_rum3 <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Treatment, Hutch, Minute, Rum_sec, Rum_secBaseline)) %>%
+  group_by(.imp, ID) %>%
+  filter(.imp == 0) %>%
+  dplyr::slice(1) %>%
+  mutate(Rum_lat = NA)
+
+
+subset.lat_rum <- rbind(subset.lat_rum1, subset.lat_rum2, subset.lat_rum3) %>%
+  mutate(Rum_lat = Rum_lat*20) %>%
+  dplyr::select(-c(Minute, Rum_sec, Rum_secBaseline)) 
+
+hist(subset.lat_rum$Rum_lat)
+
+subset.lat_rum <- as.mids(subset.lat_rum) 
+
+model.rum_lat <- 
+  with(
+    subset.lat_rum,
+    glmmTMB(
+      Rum_lat ~ Treatment + (1|Hutch), 
+      family = nbinom2(),
+      verbose = F, 
+      REML = F
+    )
+  )
+
+simulationOutput <- simulateResiduals(model.rum_lat$ana[[10]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.rum_lat$ana[[x]], test.statistic = "Chisq")[1,1]})), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.rum_lat, ~ Treatment, type = "response")
+lsmeans
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.rum_lat, ~ Treatment, type = "response"), ratio = F, method = "pairwise")
+```
+
+# Latency to lie down (nb2)
+```{r}
+subset.lat_lie1 <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Treatment, Hutch, Minute, Down_sec)) %>%
+  group_by(.imp, ID) %>%
+  filter(Down_sec != 0) %>%
+  arrange(Minute) %>%
+  dplyr::slice(1) %>%
+  mutate(Lie_lat = as.numeric(Minute)) %>%
+  filter(.imp != 0)
+  
+subset.lat_lie2 <- 
+  mice::complete(behavior.dat.post.imp, action = "long", include = T) %>%
+  dplyr::select(c(.imp, .id, ID, Breed, Treatment, Hutch, Minute, Down_sec)) %>%
+  group_by(.imp, ID) %>%
+  filter(.imp == 0) %>%
+  dplyr::slice(1) %>%
+  mutate(Lie_lat = NA)
+
+
+subset.lat_lie <- rbind(subset.lat_lie1, subset.lat_lie2) %>%
+  mutate(Lie_lat = Lie_lat*20) %>%
+  dplyr::select(-c(Minute, Down_sec)) 
+
+hist(subset.lat_lie$Lie_lat)
+
+subset.lat_lie <- as.mids(subset.lat_lie) 
+
+model.lie_lat <- 
+  with(
+    subset.lat_lie,
+    glmmTMB(
+      Lie_lat ~ Treatment + (1|Hutch), 
+      family = nbinom2(),
+      verbose = F, 
+      REML = F
+    )
+  )
+
+simulationOutput <- simulateResiduals(model.lie_lat$ana[[10]])
+testDispersion(simulationOutput, plot = F, alternative = "greater")
+testZeroInflation(simulationOutput, plot = F, alternative = "greater")
+
+#pooled Chisq-tests
+miceadds::micombine.chisquare(as.data.frame(lapply(analysis, function(x) {
+  Anova(model.lie_lat$ana[[x]], test.statistic = "Chisq")[1,1]})), 2)
+
+##lsmeans
+lsmeans <- emmeans(model.lie_lat, ~ Treatment, type = "response")
+lsmeans
+
+#means separation
+multcomp::cld(lsmeans, alpha = .05)
+
+confint(contrast(regrid(lsmeans), ratio = F, method = "pairwise"))
+
+contrast(emmeans(model.lie_lat, ~ Treatment, type = "response"), ratio = F, method = "pairwise")
+```
+
